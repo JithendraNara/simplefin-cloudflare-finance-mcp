@@ -1,0 +1,7 @@
+tunnel: simplefin-mcp
+credentials-file: /etc/cloudflared/simplefin-mcp.json
+
+ingress:
+  - hostname: simplefin-mcp.example.com
+    service: http://127.0.0.1:3344
+  - service: http_status:404

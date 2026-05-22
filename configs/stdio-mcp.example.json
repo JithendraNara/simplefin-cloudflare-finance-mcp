@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "simplefin": {
+      "command": "node",
+      "args": [
+        "/absolute/path/to/simplefin-mcp/dist/index.js",
+        "--transport",
+        "stdio"
+      ],
+      "env": {
+        "SIMPLEFIN_ACCESS_URL": "paste-access-url-later"
+      }
+    }
+  }
+}

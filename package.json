@@ -1,0 +1,41 @@
+{
+  "name": "simplefin-mcp",
+  "version": "0.1.0",
+  "description": "Cloudflare Worker remote MCP server for SimpleFIN finance data.",
+  "type": "module",
+  "private": false,
+  "license": "MIT",
+  "bin": {
+    "simplefin-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev:http": "tsx watch src/index.ts --transport http",
+    "dev:stdio": "tsx src/index.ts --transport stdio",
+    "start:http": "node --no-warnings dist/index.js --transport http",
+    "start:stdio": "node --no-warnings dist/index.js --transport stdio",
+    "typecheck": "tsc --noEmit",
+    "worker:typecheck": "tsc -p worker/tsconfig.json",
+    "worker:dev": "wrangler dev --config worker/wrangler.toml --test-scheduled",
+    "worker:deploy": "wrangler deploy --config worker/wrangler.toml",
+    "worker:migrate:remote": "wrangler d1 migrations apply DB --remote --config worker/wrangler.toml"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.7.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "agents": "^0.13.2",
+    "dotenv": "^16.4.7",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260522.1",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.94.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

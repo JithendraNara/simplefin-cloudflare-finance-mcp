@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "simplefin": {
+      "type": "streamable-http",
+      "url": "https://finance.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_BEARER_TOKEN}"
+      }
+    }
+  }
+}
