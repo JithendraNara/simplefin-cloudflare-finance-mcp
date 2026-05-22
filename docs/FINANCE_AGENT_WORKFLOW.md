@@ -2,6 +2,16 @@
 
 Use this document as the operating guide for agents connected to a deployed SimpleFIN Finance MCP server.
 
+## Auth Layers
+
+Do not confuse SimpleFIN auth with MCP auth:
+
+- SimpleFIN Bridge does not use OAuth. It uses a one-time setup token that is
+  claimed into a secret Access URL.
+- This Worker exposes OAuth/bearer auth for MCP clients at `/mcp`.
+- Once `SIMPLEFIN_ACCESS_URL` is stored as a Worker secret, agents should
+  connect to the Worker instead of asking the user for a new setup token.
+
 ## First Calls
 
 1. `agent_guidance`

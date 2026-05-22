@@ -95,6 +95,17 @@ Never commit or paste:
 - `ADMIN_TOKEN`
 - GitHub OAuth client secret
 
+## Auth Layers
+
+There are two auth layers:
+
+- SimpleFIN Bridge auth is not OAuth. It is a one-time setup-token claim that
+  produces an Access URL.
+- MCP client auth is OAuth or bearer-token auth to your Worker at `/mcp`.
+
+Once `SIMPLEFIN_ACCESS_URL` is configured as a Worker secret, normal agents do
+not need SimpleFIN setup tokens. They should connect to your deployed Worker.
+
 ## OAuth Setup
 
 Create a GitHub OAuth app:
