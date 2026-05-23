@@ -146,6 +146,26 @@ Use this for clients that support Streamable HTTP plus headers:
 
 Use `MCP_BEARER_TOKEN` for read-only tools. Use `ADMIN_TOKEN` only for setup, sync, and refresh operations.
 
+Cloudflare Worker secrets are write-only in normal operation. Wrangler can set
+or rotate `MCP_BEARER_TOKEN`, but it cannot reveal the existing plaintext token
+later.
+
+For remote agents on other machines:
+
+- Use MCP OAuth if the client supports it.
+- Otherwise transfer the read-only bearer token out-of-band through a password
+  manager, SSH, or another private channel.
+- Do not paste tokens into public chats, issues, logs, or committed config
+  files.
+- If the token is lost or exposed, rotate it with:
+
+```bash
+npx wrangler secret put MCP_BEARER_TOKEN --config worker/wrangler.toml
+```
+
+Then update every bearer-token client. OAuth clients do not need the bearer
+token.
+
 ## MCP Tools
 
 Read tools:

@@ -85,6 +85,21 @@ Avoid loading raw transaction history unless the user asks a narrow question. If
 
 Admin tools require either `ADMIN_TOKEN` or OAuth for the allowed GitHub login configured in `GITHUB_ALLOWED_LOGIN`.
 
+## Remote Agents
+
+Agents running on another machine cannot retrieve existing Cloudflare Worker
+secret values. Wrangler can set or rotate secrets, but it cannot print the
+plaintext `MCP_BEARER_TOKEN` or `ADMIN_TOKEN` after they are stored.
+
+Use one of these paths:
+
+- MCP OAuth: configure only the `/mcp` URL and complete OAuth in the client.
+- Bearer header: transfer the read-only bearer token out-of-band through a
+  password manager, SSH, or another private channel.
+
+Do not ask users to paste bearer tokens into public chat. Do not ask for a
+SimpleFIN setup token unless the bank connection is being replaced.
+
 ## MCP Client Examples
 
 Bearer-header clients:

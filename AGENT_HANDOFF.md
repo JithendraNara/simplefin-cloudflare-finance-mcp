@@ -18,6 +18,9 @@ Security rules:
 - Public examples should use placeholders such as `finance.example.com`, `<MCP_BEARER_TOKEN>`, and `your-github-login`.
 - Read-only bearer clients should not see admin tools.
 - OAuth admin access is limited by `GITHUB_ALLOWED_LOGIN`.
+- Remote agents cannot read Cloudflare Worker secret values later. Use MCP
+  OAuth, or transfer the read-only bearer token out-of-band through a private
+  channel. Do not tell agents to pull existing secret plaintext from Wrangler.
 
 Agent usage rules:
 
