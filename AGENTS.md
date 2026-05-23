@@ -1,4 +1,4 @@
-# Agent Handoff
+# AGENTS.md
 
 This repository is a public starter for a self-hosted SimpleFIN finance MCP server on Cloudflare Workers.
 
