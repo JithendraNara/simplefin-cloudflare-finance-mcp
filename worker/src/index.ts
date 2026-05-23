@@ -10,7 +10,10 @@ export default {
     const url = new URL(request.url);
     try {
       const registrationError = await validateClientRegistration(request);
-      const response = registrationError ?? await oauthProviderFor(env, request).fetch(request, env, ctx);
+      const response = registrationError ?? await maybeNormalizeRegistrationResponse(
+        request,
+        await oauthProviderFor(env, request).fetch(request, env, ctx)
+      );
       if (shouldAuditHttp(url.pathname, response.status)) {
         ctx.waitUntil(
           saveHttpEvent(env, {
@@ -56,7 +59,7 @@ async function runScheduledSync(env: Env): Promise<void> {
 
 function shouldAuditHttp(path: string, status: number): boolean {
   if (path === "/mcp") return status >= 400;
-  return new Set([
+  return path.startsWith("/register") || new Set([
     "/health",
     "/ready",
     "/authorize",
@@ -70,6 +73,22 @@ function shouldAuditHttp(path: string, status: number): boolean {
     "/admin/oauth/grants",
     "/admin/oauth/revoke"
   ]).has(path);
+}
+
+async function maybeNormalizeRegistrationResponse(request: Request, response: Response): Promise<Response> {
+  const url = new URL(request.url);
+  if (url.pathname !== "/register" || request.method !== "POST" || response.status !== 201) {
+    return response;
+  }
+
+  const body = await response.clone().json() as Record<string, unknown>;
+  delete body.registration_client_uri;
+  return new Response(JSON.stringify(body), {
+    status: response.status,
+    headers: {
+      "content-type": "application/json"
+    }
+  });
 }
 
 async function validateClientRegistration(request: Request): Promise<Response | undefined> {
@@ -93,10 +112,10 @@ async function validateClientRegistration(request: Request): Promise<Response | 
 
   const metadata = body as Record<string, unknown>;
   const redirectUris = metadata.redirect_uris;
-  if (!Array.isArray(redirectUris) || redirectUris.length < 1 || redirectUris.length > 5) {
+  if (!Array.isArray(redirectUris) || redirectUris.length < 1 || redirectUris.length > 20) {
     return errorJson("invalid_redirect_uris", 400, {
       code: "invalid_redirect_uris",
-      reason: "redirect_uris must contain 1 to 5 URI strings"
+      reason: "redirect_uris must contain 1 to 20 URI strings"
     });
   }
 
@@ -104,7 +123,7 @@ async function validateClientRegistration(request: Request): Promise<Response | 
     if (typeof redirectUri !== "string" || !isAllowedRedirectUri(redirectUri)) {
       return errorJson("invalid_redirect_uri", 400, {
         code: "invalid_redirect_uri",
-        reason: "redirect URIs must be https URLs or loopback http URLs"
+        reason: "redirect URIs must be valid and must not use dangerous browser-executable schemes"
       });
     }
   }
@@ -139,14 +158,15 @@ async function validateClientRegistration(request: Request): Promise<Response | 
 }
 
 function isAllowedRedirectUri(value: string): boolean {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
+  const normalized = value.trim();
+  for (let index = 0; index < normalized.length; index += 1) {
+    const code = normalized.charCodeAt(index);
+    if ((code >= 0 && code <= 31) || (code >= 127 && code <= 159)) return false;
+  }
+  const colonIndex = normalized.indexOf(":");
+  if (colonIndex <= 0) {
     return false;
   }
-
-  if (url.protocol === "https:") return true;
-  if (url.protocol !== "http:") return false;
-  return ["127.0.0.1", "::1", "localhost"].includes(url.hostname);
+  const scheme = normalized.slice(0, colonIndex + 1).toLowerCase();
+  return !new Set(["javascript:", "data:", "vbscript:", "file:", "mailto:", "blob:"]).has(scheme);
 }

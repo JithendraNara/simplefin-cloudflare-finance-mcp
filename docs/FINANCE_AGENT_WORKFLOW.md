@@ -150,6 +150,21 @@ OAuth Client ID: leave blank
 OAuth Client Secret: leave blank
 ```
 
+Dynamic Client Registration is preflighted before requests reach the OAuth
+provider:
+
+- redirect URIs must be syntactically valid and cannot use dangerous
+  browser-executable schemes such as `javascript:`, `data:`, or `file:`
+- only `code` response type is allowed
+- only `authorization_code` and `refresh_token` grants are allowed
+- token endpoint auth method must be `none`, `client_secret_basic`, or
+  `client_secret_post`
+
+The registration response omits `registration_client_uri` for compatibility
+with ChatGPT custom connectors. The OAuth provider still stores the registered
+client in KV; the management URI is not required for normal authorization-code
+login.
+
 ## Safety
 
 Never paste or expose:
