@@ -121,7 +121,8 @@ Use `ADMIN_TOKEN` instead of `MCP_BEARER_TOKEN` only for administrative tools su
 
 ## Debug API
 
-All debug endpoints except `/health` require:
+`/health` and `/ready` are public status endpoints. Administrative endpoints
+require:
 
 ```http
 Authorization: Bearer <ADMIN_TOKEN>
@@ -134,6 +135,9 @@ Endpoints:
 - `POST /admin/sync`
 - `GET /admin/debug/accounts`
 - `GET /admin/debug/transactions?limit=200`
+- `GET /admin/debug/events?limit=50`
+- `GET /admin/oauth/grants?user_id=<provider-user-id>`
+- `POST /admin/oauth/revoke`
 
 Without explicit `startDate` or `days`, sync is incremental: after the initial
 backfill it starts from the last successful sync end date with a small
@@ -181,6 +185,24 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 - `find_unusual_transactions`
 - `generate_weekly_money_briefing`
 - `refresh_insights`
+- `worker_audit_events` (admin only)
+
+## Secure Operational Audit
+
+Workers Logs are disabled in `wrangler.toml` because Cloudflare invocation
+metadata can include request authorization headers. Operational audit events
+are instead written to D1 table `operational_events` with 30-day retention.
+
+The audit stores only known endpoint paths, MCP tool names, auth mode, admin
+flag, status, duration, and limited scheduled-sync counts or error codes. It
+does not store credentials, request bodies, tool arguments, or finance response
+payloads. Read it with admin MCP tool `worker_audit_events` or
+`GET /admin/debug/events`.
+
+For OAuth token incident response, use the admin-only OAuth grant endpoints to
+list grants for the provider user ID and revoke each affected grant. Revocation
+invalidates its OAuth access and refresh tokens; the client must authenticate
+again.
 
 ## Verification
 

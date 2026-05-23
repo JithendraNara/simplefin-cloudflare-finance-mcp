@@ -303,6 +303,21 @@ export function createFinanceMcpServer(env: Env, auth: ToolAuth): McpServer {
 
   if (auth.isAdmin) {
     server.registerTool(
+      "worker_audit_events",
+      {
+        title: "Worker Audit Events",
+        description: "Admin-only. Read sanitized Worker route and MCP tool audit events retained in D1.",
+        inputSchema: {
+          limit: z.number().int().min(1).max(200).default(50)
+        }
+      },
+      async ({ limit }) => {
+        requireAdmin(auth);
+        return result(await repo.operationalEvents({ limit }));
+      }
+    );
+
+    server.registerTool(
       "refresh_insights",
       {
         title: "Refresh Insights",

@@ -82,8 +82,26 @@ Avoid loading raw transaction history unless the user asks a narrow question. If
 - `claim_setup_token`
 - `categorize_uncategorized_transactions`
 - `refresh_insights`
+- `worker_audit_events`
 
 Admin tools require either `ADMIN_TOKEN` or OAuth for the allowed GitHub login configured in `GITHUB_ALLOWED_LOGIN`.
+
+## Operational Audit
+
+Keep Cloudflare Workers Logs disabled for this finance Worker. Invocation log
+metadata can retain request headers, including bearer or OAuth authorization
+values.
+
+Admin sessions can call `worker_audit_events` to inspect a D1-backed sanitized
+audit trail retained for 30 days. It records only known operational routes, MCP
+tool names, auth mode, admin flag, response status, duration, and limited
+scheduled-sync counts or error codes. It never stores request bodies, tool
+arguments, finance responses, or credentials.
+
+For incident response, an admin bearer session can use
+`GET /admin/oauth/grants?user_id=<provider-user-id>` and
+`POST /admin/oauth/revoke` with `{ "userId": "...", "grantId": "..." }` to
+invalidate issued OAuth sessions after suspected token exposure.
 
 ## Remote Agents
 

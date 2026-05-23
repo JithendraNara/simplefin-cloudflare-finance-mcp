@@ -10,7 +10,8 @@ import { authForStaticBearerToken, authorizeAdmin } from "./auth.js";
 import { errorJson, json, parseNumber } from "./http.js";
 import { createFinanceMcpServer } from "./mcp.js";
 import { FinanceRepository } from "./repository.js";
-import { syncSimpleFin } from "./sync.js";
+import { ManualSyncRateLimitError, syncSimpleFin } from "./sync.js";
+import { saveMcpEvent } from "./telemetry.js";
 import type { Env, ToolAuth } from "./types.js";
 
 const DEFAULT_ORIGIN = "https://your-finance-domain.example.com";
@@ -26,6 +27,8 @@ export type OAuthMcpProps = ToolAuth & {
 
 class FinanceMcpApiHandler extends WorkerEntrypoint<Env, OAuthMcpProps> {
   async fetch(request: Request): Promise<Response> {
+    const startedAt = Date.now();
+    const operation = safeMcpOperation(request);
     const props = this.ctx.props;
     const auth: ToolAuth = {
       isAdmin: props?.isAdmin === true,
@@ -33,7 +36,16 @@ class FinanceMcpApiHandler extends WorkerEntrypoint<Env, OAuthMcpProps> {
       authType: props?.authType
     };
     const server = createFinanceMcpServer(this.env, auth);
-    return createMcpHandler(server, { route: "/mcp" })(request, this.env, this.ctx);
+    const response = await createMcpHandler(server, { route: "/mcp" })(request, this.env, this.ctx);
+    this.ctx.waitUntil(
+      saveMcpEvent(this.env, {
+        operation: await operation,
+        auth,
+        status: response.status,
+        durationMs: Date.now() - startedAt
+      })
+    );
+    return response;
   }
 }
 
@@ -67,14 +79,21 @@ const defaultHandler: ExportedHandler<Env> = {
       const bodyDays = typeof body.days === "number" ? body.days : undefined;
       const startDate = typeof body.startDate === "string" ? body.startDate : url.searchParams.get("startDate") ?? undefined;
       const endDate = typeof body.endDate === "string" ? body.endDate : url.searchParams.get("endDate") ?? undefined;
-      return json(await syncSimpleFin(env, {
-        startDate,
-        endDate,
-        days: requestedDays ? parseNumber(requestedDays, 1, 1, 90) : bodyDays,
-        pending: typeof body.pending === "boolean" ? body.pending : url.searchParams.get("pending") !== "0",
-        force: body.force === true || url.searchParams.get("force") === "1",
-        trigger: "manual"
-      }));
+      try {
+        return json(await syncSimpleFin(env, {
+          startDate,
+          endDate,
+          days: requestedDays ? parseNumber(requestedDays, 1, 1, 90) : bodyDays,
+          pending: typeof body.pending === "boolean" ? body.pending : url.searchParams.get("pending") !== "0",
+          force: body.force === true || url.searchParams.get("force") === "1",
+          trigger: "manual"
+        }));
+      } catch (error) {
+        if (error instanceof ManualSyncRateLimitError) {
+          return errorJson(error.message, 429, { code: "manual_sync_rate_limit" });
+        }
+        throw error;
+      }
     }
 
     if (url.pathname === "/admin/debug/accounts") {
@@ -92,6 +111,37 @@ const defaultHandler: ExportedHandler<Env> = {
         limit: parseNumber(url.searchParams.get("limit"), 200, 1, 1000)
       });
       return json({ transactions, count: transactions.length });
+    }
+
+    if (url.pathname === "/admin/debug/events") {
+      const unauthorized = await authorizeAdmin(request, env);
+      if (unauthorized) return unauthorized;
+      return json(await new FinanceRepository(env).operationalEvents({
+        limit: parseNumber(url.searchParams.get("limit"), 50, 1, 200)
+      }));
+    }
+
+    if (url.pathname === "/admin/oauth/grants" && request.method === "GET") {
+      const unauthorized = await authorizeAdmin(request, env);
+      if (unauthorized) return unauthorized;
+      const userId = url.searchParams.get("user_id");
+      if (!userId) return errorJson("user_id_required", 400);
+      const oauth = getOAuthApi(oauthOptionsFor(env, request), env);
+      return json(await oauth.listUserGrants(userId, {
+        limit: parseNumber(url.searchParams.get("limit"), 50, 1, 200)
+      }));
+    }
+
+    if (url.pathname === "/admin/oauth/revoke" && request.method === "POST") {
+      const unauthorized = await authorizeAdmin(request, env);
+      if (unauthorized) return unauthorized;
+      const body = await readJsonBody(request);
+      if (typeof body.userId !== "string" || typeof body.grantId !== "string") {
+        return errorJson("userId_and_grantId_required", 400);
+      }
+      const oauth = getOAuthApi(oauthOptionsFor(env, request), env);
+      await oauth.revokeGrant(body.grantId, body.userId);
+      return json({ revoked: true, grant_id: body.grantId, user_id: body.userId });
     }
 
     return errorJson("not_found", 404);
@@ -248,13 +298,7 @@ function oauthOptionsFor(env: Env, request?: Request): OAuthProviderOptions<Env>
       return auth ? { props: auth, audience: mcpUrl } : null;
     },
     onError: (error) => {
-      console.error(JSON.stringify({
-        event: "oauth_error",
-        code: error.code,
-        status: error.status,
-        description: error.description,
-        internal: error.internal
-      }));
+      void error;
     }
   };
 }
@@ -286,5 +330,24 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
     return body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
   } catch {
     return {};
+  }
+}
+
+async function safeMcpOperation(request: Request): Promise<string> {
+  const contentLength = Number(request.headers.get("content-length") ?? "0");
+  if (contentLength > 32768 || !request.headers.get("content-type")?.includes("application/json")) {
+    return "unknown";
+  }
+  try {
+    const body = await request.clone().json() as {
+      method?: unknown;
+      params?: { name?: unknown };
+    };
+    if (body.method === "tools/call" && typeof body.params?.name === "string") {
+      return `tools/call:${body.params.name}`;
+    }
+    return typeof body.method === "string" ? body.method : "unknown";
+  } catch {
+    return "unknown";
   }
 }

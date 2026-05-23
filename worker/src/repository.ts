@@ -737,6 +737,23 @@ export class FinanceRepository {
 	    return { sync_runs: syncRuns, account_events: accountEvents };
 	  }
 
+  async operationalEvents(options: { limit?: number } = {}): Promise<Record<string, unknown>> {
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
+    const { results } = await this.env.DB.prepare(
+      `SELECT created_at, event_type, path, method, operation, auth_type, is_admin, status, duration_ms, details_json
+       FROM operational_events
+       ORDER BY created_at DESC
+       LIMIT ?`
+    )
+      .bind(limit)
+      .all();
+    return {
+      retention_days: 30,
+      sanitization: "No bearer tokens, OAuth tokens, finance payloads, request bodies, or tool arguments are stored.",
+      events: results
+    };
+  }
+
 	  async simpleFinRawAccount(options: {
 	    accountId: string;
 	    includeRawJson?: boolean;

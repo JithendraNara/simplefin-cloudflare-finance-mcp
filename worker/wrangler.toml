@@ -44,8 +44,7 @@ binding = "VECTOR_INDEX"
 index_name = "simplefin-transactions"
 
 [observability]
-enabled = true
-head_sampling_rate = 1
+enabled = false
 
 # Required secrets:
 #   npx wrangler secret put SIMPLEFIN_ACCESS_URL --config worker/wrangler.toml

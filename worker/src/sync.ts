@@ -9,6 +9,13 @@ const MAX_SIMPLEFIN_WINDOW_DAYS = 90;
 const DEFAULT_INCREMENTAL_OVERLAP_DAYS = 3;
 const MAX_AUTO_BACKFILL_ACCOUNTS_PER_SYNC = 5;
 
+export class ManualSyncRateLimitError extends Error {
+  constructor() {
+    super("manual sync rate limit reached; use force=true with admin token if you really need another sync");
+    this.name = "ManualSyncRateLimitError";
+  }
+}
+
 export async function syncSimpleFin(env: Env, options: SyncOptions): Promise<Record<string, unknown>> {
   const repo = new FinanceRepository(env);
   const endDate = options.endDate ?? today();
@@ -18,7 +25,7 @@ export async function syncSimpleFin(env: Env, options: SyncOptions): Promise<Rec
   if (options.trigger === "manual" && !options.force) {
     const recentManualSyncs = await repo.recentManualSyncCount();
     if (recentManualSyncs >= 3) {
-      throw new Error("manual sync rate limit reached; use force=true with admin token if you really need another sync");
+      throw new ManualSyncRateLimitError();
     }
   }
 
