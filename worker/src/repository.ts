@@ -26,9 +26,28 @@ export class FinanceRepository {
       enriched_transactions: enriched?.count ?? 0,
 	      last_sync: lastSync ?? null,
 	      data_freshness: await this.dataFreshness(),
-	      account_coverage: await this.accountCoverageSummary()
+	      account_coverage: await this.accountCoverageSummary(),
+	      scheduled_sync: await this.scheduledSyncStatus()
 	    };
 	  }
+
+  async scheduledSyncStatus(): Promise<Record<string, unknown>> {
+    const lastScheduledSync = await this.env.DB.prepare(
+      `SELECT synced_at, start_date, end_date, account_count, transaction_count, errlist_json, status, error
+       FROM sync_runs
+       WHERE trigger = 'scheduled'
+       ORDER BY synced_at DESC
+       LIMIT 1`
+    ).first<Record<string, unknown>>();
+
+    return {
+      cron_utc: "15 12 * * *",
+      cadence: "daily",
+      verified_completed_run: Boolean(lastScheduledSync),
+      verification_status: lastScheduledSync ? "verified" : "awaiting_first_scheduled_run",
+      last_scheduled_sync: lastScheduledSync ?? null
+    };
+  }
 
   async dataFreshness(): Promise<Record<string, unknown>> {
     const maxStalenessHours = Math.max(1, Number(this.env.DATA_MAX_STALENESS_HOURS ?? "36"));
@@ -130,6 +149,7 @@ export class FinanceRepository {
     const lastSync = status.last_sync as { status?: string; synced_at?: string } | null;
     const dataFreshness = await this.dataFreshness();
 	    const accountCoverage = await this.accountCoverageSummary();
+	    const scheduledSync = await this.scheduledSyncStatus();
 	    const accountCoverageHealthy = accountCoverage.healthy !== false;
 	    const readiness = {
 	      ready: Boolean(lastSync?.status === "ok" && transactions > 0 && dataFreshness.fresh === true && accountCoverageHealthy),
@@ -146,6 +166,7 @@ export class FinanceRepository {
       generated_at: new Date().toISOString(),
 	      readiness,
 	      data_freshness: dataFreshness,
+	      scheduled_sync: scheduledSync,
 	      account_coverage: accountCoverage,
 	      coverage,
       recent_syncs: recentSyncs,

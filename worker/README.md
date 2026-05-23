@@ -155,6 +155,11 @@ has unresolved backfill gaps. Agent-facing tools also include `data_freshness`
 and `account_coverage` so clients do not silently trust stale or partial cached
 finance data.
 
+`worker_operational_status` and `/ready` also include `scheduled_sync`. A cron
+configuration is not considered runtime-verified until
+`scheduled_sync.verification_status` becomes `verified` after a completed
+scheduled sync.
+
 Example:
 
 ```bash
@@ -186,6 +191,10 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 - `generate_weekly_money_briefing`
 - `refresh_insights`
 - `worker_audit_events` (admin only)
+
+Weekly briefing generation requests structured JSON from Workers AI and retries
+once when the model returns invalid JSON. If both attempts fail, the Worker
+saves and returns a deterministic aggregate fallback instead of failing sync.
 
 ## Secure Operational Audit
 

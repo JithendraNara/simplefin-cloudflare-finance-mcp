@@ -29,6 +29,8 @@ Agent usage rules:
 
 - Do not call `sync_simplefin` before every question.
 - Trust `/ready` only when both freshness and account coverage are healthy.
+- Check `scheduled_sync.verification_status`; configured cron is not proven
+  until a scheduled run has completed.
 - Use `simplefin_data_coverage` as the account-level trust gate.
 - Use `simplefin_raw_account` only for one `accountId` at a time with a narrow `limit`.
 - Prefer summaries and search tools over loading all transactions into context.

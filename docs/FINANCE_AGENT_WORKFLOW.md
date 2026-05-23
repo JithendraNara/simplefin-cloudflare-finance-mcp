@@ -23,6 +23,11 @@ Do not confuse SimpleFIN auth with MCP auth:
 
 Do not begin finance analysis if `/ready`, `worker_operational_status`, or `simplefin_data_coverage` reports stale or incomplete data.
 
+`worker_operational_status.scheduled_sync.verification_status` distinguishes a
+configured cron from a cron that has actually completed in production. Treat
+`awaiting_first_scheduled_run` as unverified scheduling, even when data is
+fresh from a manual sync.
+
 ## Coverage First
 
 `simplefin_data_coverage` is the per-account trust gate. It reports:

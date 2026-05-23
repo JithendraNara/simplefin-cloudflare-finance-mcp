@@ -2,6 +2,7 @@ import type { Enrichment, Env, TransactionRow } from "./types.js";
 import { FinanceRepository, transactionText } from "./repository.js";
 
 const DAILY_AI_ITEM_LIMIT = 500;
+const MAX_BRIEFING_ATTEMPTS = 2;
 
 export async function categorizeTransactions(env: Env, repo: FinanceRepository, limit = 20): Promise<Record<string, unknown>> {
   const model = env.AI_MODEL ?? "@cf/meta/llama-3.1-8b-instruct";
@@ -89,50 +90,58 @@ export async function generateBriefing(
       category: transaction.category
     }));
 
-  try {
-    const output = await env.AI.run(model, {
-      messages: [
-        {
-          role: "system",
-          content: "You write concise personal finance briefings from structured data. Return strict JSON only. Do not invent facts."
-        },
-        {
-          role: "user",
-          content: `Write a weekly money briefing for ${periodStart} through ${periodEnd}.\n\nData:\n${JSON.stringify({ summary, subscriptions: compactSubscriptions, largeTransactions })}`
+  const briefingData = { summary, subscriptions: compactSubscriptions, largeTransactions };
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= MAX_BRIEFING_ATTEMPTS; attempt += 1) {
+    try {
+      const output = await env.AI.run(model, {
+        messages: [
+          {
+            role: "system",
+            content: "You write concise personal finance briefings from structured data. Return one valid JSON object only. Do not invent facts."
+          },
+          {
+            role: "user",
+            content: buildBriefingPrompt(periodStart, periodEnd, briefingData, attempt)
+          }
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: briefingSchema
         }
-      ],
-      response_format: {
-        type: "json_schema",
-        json_schema: briefingSchema
-      }
-    } as AiTextGenerationInput);
-    const parsed = parseJsonObject(extractText(output));
-    const summaryText = typeof parsed.summary_text === "string" ? parsed.summary_text : extractText(output);
-    const briefing = await repo.saveBriefing({
-      periodStart,
-      periodEnd,
-      kind: "weekly",
-      summaryJson: parsed,
-      summaryText,
-      model
-    });
-    await repo.saveAiUsage("generate_weekly_money_briefing", model, 1, "ok");
-    return { cached: false, briefing };
-  } catch (error) {
-    await repo.saveAiUsage("generate_weekly_money_briefing", model, 1, "error", error);
-    return {
-      cached: false,
-      briefing: await repo.saveBriefing({
+      } as AiTextGenerationInput);
+      const parsed = validateBriefing(parseJsonObject(extractText(output)));
+      const briefing = await repo.saveBriefing({
         periodStart,
         periodEnd,
         kind: "weekly",
-        summaryJson: { summary, subscriptions, largeTransactions },
-        summaryText: "Workers AI briefing generation failed; deterministic finance summary is available in summary_json.",
+        summaryJson: parsed,
+        summaryText: parsed.summary_text as string,
         model
-      }),
-      error: error instanceof Error ? error.message : String(error)
-    };
+      });
+      await repo.saveAiUsage("generate_weekly_money_briefing", model, 1, "ok");
+      return { cached: false, attempts: attempt, briefing };
+    } catch (error) {
+      lastError = error;
+      await repo.saveAiUsage("generate_weekly_money_briefing", model, 1, "error", error);
+    }
   }
+
+  return {
+    cached: false,
+    attempts: MAX_BRIEFING_ATTEMPTS,
+    fallback: "deterministic",
+    briefing: await repo.saveBriefing({
+      periodStart,
+      periodEnd,
+      kind: "weekly",
+      summaryJson: { summary, subscriptions, largeTransactions },
+      summaryText: "Workers AI briefing generation failed; deterministic finance summary is available in summary_json.",
+      model
+    }),
+    error: lastError instanceof Error ? lastError.message : String(lastError)
+  };
 }
 
 export async function explainUnusualTransactions(env: Env, repo: FinanceRepository, limit = 10): Promise<Record<string, unknown>> {
@@ -210,6 +219,31 @@ const briefingSchema = {
   },
   required: ["summary_text", "highlights", "risks", "next_actions"]
 };
+
+function buildBriefingPrompt(
+  periodStart: string,
+  periodEnd: string,
+  data: Record<string, unknown>,
+  attempt: number
+): string {
+  const instruction = attempt === 1
+    ? "Write a weekly money briefing"
+    : "The prior response failed JSON validation. Retry and return exactly one JSON object with string summary_text and string arrays highlights, risks, and next_actions";
+  return `${instruction} for ${periodStart} through ${periodEnd}.\n\nData:\n${JSON.stringify(data)}`;
+}
+
+function validateBriefing(value: Record<string, unknown>): Record<string, unknown> {
+  const arrayFields = ["highlights", "risks", "next_actions"] as const;
+  if (typeof value.summary_text !== "string") {
+    throw new Error("Workers AI briefing response missing summary_text");
+  }
+  for (const field of arrayFields) {
+    if (!Array.isArray(value[field]) || value[field].some((item) => typeof item !== "string")) {
+      throw new Error(`Workers AI briefing response missing ${field}`);
+    }
+  }
+  return value;
+}
 
 const unusualTransactionsSchema = {
   type: "object",
