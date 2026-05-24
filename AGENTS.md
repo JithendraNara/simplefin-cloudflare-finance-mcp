@@ -53,6 +53,11 @@ Agent usage rules:
 - Corrections are stored in D1, feed future categorization prompts as
   few-shot examples, and refresh the affected transaction's Vectorize
   embedding.
+- Suggested taxonomy: use `debt_collection` separately from `fees`; use
+  `rewards` for card rewards/cashback; keep BNPL in the underlying spend
+  category while recurring-obligation tools track the pattern; use
+  `cash_advance` for Zolve/cash-advance-like rows; use `business` for cloud or
+  infrastructure spend.
 - Use `simplefin_raw_account` only for one `accountId` at a time with a narrow `limit`.
 - Prefer summaries and search tools over loading all transactions into context.
 - Keep [README.md](README.md) focused on positioning, sample output, and

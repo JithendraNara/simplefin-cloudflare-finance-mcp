@@ -232,6 +232,11 @@ strips common processor/code suffixes and maps common synonyms such as
 `interest` to `interest charge`. Display layers can canonicalize names
 separately.
 
+The categorizer recognizes taxonomy extensions for hard finance cases:
+`rewards`, `cash_advance`, `debt_collection`, and `business`. BNPL/installments
+remain in the underlying spend category while recurring-obligation tools track
+the obligation pattern.
+
 `worker_operational_status.ai_enrichment` includes a fixed
 `low_confidence_threshold` plus a `confidence_distribution` histogram. Use these
 instead of assuming `enriched_transactions == transactions` means

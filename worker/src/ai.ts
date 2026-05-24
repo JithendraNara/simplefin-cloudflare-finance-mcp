@@ -364,7 +364,15 @@ function buildCategorizationPrompt(transactions: TransactionRow[], correctionExa
   const correctionsBlock = correctionExamples.length > 0
     ? `\nRecent user corrections. Apply the same logic to similar transactions:\n${formatCorrectionExamples(correctionExamples)}\n`
     : "";
-  return `Categorize these transactions into one of: income, housing, groceries, dining, dining_offset, transport, subscriptions, health, utilities, transfers, shopping, taxes, fees, entertainment, uncategorized.
+  return `Categorize these transactions into one of: income, rewards, housing, groceries, dining, dining_offset, transport, subscriptions, health, utilities, transfers, cash_advance, debt_collection, shopping, business, taxes, fees, entertainment, uncategorized.
+
+Category guidance:
+- rewards: card rewards, cashback, statement reward credits.
+- dining_offset: restaurant/dining benefit credits that should net against dining.
+- cash_advance: Zolve/cash advance or credit advance transactions; do not call these ordinary transfers.
+- debt_collection: collection-agency payments such as Sequium Asset Solution.
+- business: cloud/infrastructure/software business spend that is not a consumer subscription.
+- BNPL/installments such as Klarna usually keep the underlying spend category, commonly shopping; recurring-obligation tools track the payment pattern separately.
 
 Return this exact JSON shape:
 {"transactions":[{"transaction_id":"...","category":"...","merchant_normalized":"...","is_subscription_candidate":false,"confidence":0.0,"ai_reason":"..."}]}
@@ -486,14 +494,18 @@ function normalizeAiReason(reason: string, category: string, confidence: number)
 
 function guardedCategory(text: string, payee: string, amount: number): string | null {
   if (amount > 0 && /\b(dining credit|restaurant credit|uber cash)\b/.test(text)) return "dining_offset";
+  if (amount > 0 && /\b(reward|cashback|cash back)\b/.test(text)) return "rewards";
   if (/\b(internet transfer|account ending in \d+)\b/.test(text) || /\bach deposit\b.*\btransfer\b/.test(text)) return "transfers";
   if (amount > 0) return null;
   if (/\b(apple online store|apple store)\b/.test(text)) return "shopping";
   if (/\bapple\.com\/bill\b/.test(text)) return "subscriptions";
+  if (/\b(cbankus\.com|continental bank zolve|cash advance)\b/.test(text)) return "cash_advance";
+  if (/\b(sequium asset solution|debt collection|collection agency)\b/.test(text)) return "debt_collection";
+  if (/\b(google cloud|cloudflare)\b/.test(text)) return "business";
+  if (/\bmarathon\b/.test(text)) return "transport";
   if (/\b(uber eats|doordash|grubhub|restaurant|cafe|coffee|starbucks|chipotle|mcdonald|dunkin|taco|pizza)\b/.test(text)) return "dining";
-  if (/\b(cbankus\.com|continental bank zolve)\b/.test(text)) return "uncategorized";
   if (/\b(fee|interest|interest charge|purchase interest|late fee|returned payment|return payment|annual fee|credit protect)\b/.test(text)) return "fees";
-  if (/\b(uber one|netflix|spotify|google fi|claude\.ai subscription|openai|cloudflare|google cloud|perplexity|nous research|subscription|monthly|membership)\b/.test(text)) return "subscriptions";
+  if (/\b(uber one|netflix|spotify|google fi|claude\.ai subscription|openai|perplexity|nous research|subscription|monthly|membership)\b/.test(text)) return "subscriptions";
   if (/\b(payment|credit card|autopay|ach pmt|e-payment|epayment|applecard gsbank|american express ach|discover e-payment|zolve pmt|adjustment-payments|adjustment payments)\b/.test(text)) return "transfers";
   if (/\b(geico|gas|shell|bp|exxon|parking|transit|uber|lyft)\b/.test(text) && !/\beats\b/.test(payee)) return "transport";
   return null;
@@ -506,8 +518,12 @@ function guardrailReason(modelCategory: string, finalCategory: string, repairRea
 function guardrailReasonFor(text: string, finalCategory: string): string {
   if (finalCategory === "shopping" && /\b(apple online store|apple store)\b/.test(text)) return "Apple Store purchase";
   if (finalCategory === "dining") return "restaurant or delivery merchant";
+  if (finalCategory === "rewards") return "card reward or cashback wording";
   if (finalCategory === "fees") return "fee or interest wording";
   if (finalCategory === "subscriptions") return "known recurring subscription merchant";
+  if (finalCategory === "business") return "cloud or infrastructure merchant";
+  if (finalCategory === "cash_advance") return "cash advance or Zolve advance wording";
+  if (finalCategory === "debt_collection") return "collection agency merchant";
   if (finalCategory === "transfers") return "card payment or transfer wording";
   if (finalCategory === "transport") return "transport, gas, insurance, or rideshare wording";
   if (finalCategory === "uncategorized") return "irregular merchant requiring review";
@@ -522,9 +538,13 @@ function deterministicEnrichment(transaction: TransactionRow, model: string, err
   const merchant = normalizeMerchant(preferredMerchant);
   const category =
     transaction.amount > 0 && /\b(dining credit|restaurant credit|uber cash|credit)\b/.test(lower) ? "dining_offset" :
+    transaction.amount > 0 && /\b(reward|cashback|cash back)\b/.test(lower) ? "rewards" :
     /\b(internet transfer|account ending in \d+)\b/.test(lower) || /\bach deposit\b.*\btransfer\b/.test(lower) ? "transfers" :
     transaction.amount > 0 ? "income" :
     /\b(payment|transfer|credit card|autopay|zelle|venmo|cash app|ach pmt|e-payment|epayment)\b/.test(lower) ? "transfers" :
+    /\b(cbankus\.com|continental bank zolve|cash advance)\b/.test(lower) ? "cash_advance" :
+    /\b(sequium asset solution|debt collection|collection agency)\b/.test(lower) ? "debt_collection" :
+    /\b(google cloud|cloudflare)\b/.test(lower) ? "business" :
     /\b(fee|interest|interest charge|purchase interest|late fee|returned payment|return payment)\b/.test(lower) ? "fees" :
     /\b(rent|mortgage|apartment|lease)\b/.test(lower) ? "housing" :
     /\b(costco|walmart|target|kroger|whole foods|aldi|trader joe|grocery)\b/.test(lower) ? "groceries" :
@@ -766,6 +786,7 @@ function normalizeKey(value: string): string {
 function reasonContradictsCategory(reason: string, category: string): boolean {
   const categories = [
     "income",
+    "rewards",
     "housing",
     "groceries",
     "dining",
@@ -775,7 +796,10 @@ function reasonContradictsCategory(reason: string, category: string): boolean {
     "health",
     "utilities",
     "transfers",
+    "cash_advance",
+    "debt_collection",
     "shopping",
+    "business",
     "taxes",
     "fees",
     "entertainment",

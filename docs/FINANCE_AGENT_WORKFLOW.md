@@ -158,6 +158,16 @@ categorization prompts. `label_eval_transaction`, `run_eval`, and
 subscription quality, merchant exact-match accuracy, and confidence
 calibration over time.
 
+Suggested taxonomy extensions:
+
+- `debt_collection` is separate from routine `fees`.
+- Card rewards and cashback use `rewards`, not `income`.
+- BNPL/installments keep the underlying spend category and are tracked by
+  recurring-obligation tools.
+- Zolve/cash-advance-like transactions use `cash_advance`, not ordinary
+  `transfers`.
+- Cloud infrastructure or business software spend can use `business`.
+
 ## Operational Audit
 
 Keep Cloudflare Workers Logs disabled for this finance Worker. Invocation log

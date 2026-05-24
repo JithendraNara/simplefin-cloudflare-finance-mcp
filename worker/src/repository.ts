@@ -1186,6 +1186,7 @@ export class FinanceRepository {
       `SELECT c.field_corrected, c.value_before, c.value_after, c.signal_text, c.note, c.corrected_at
        FROM user_corrections c
        WHERE c.superseded_by IS NULL
+         AND c.value_before <> c.value_after
        ORDER BY c.corrected_at DESC
        LIMIT ?`
     )
@@ -1246,6 +1247,7 @@ export class FinanceRepository {
       const correctionId = crypto.randomUUID();
       const valueBefore = JSON.stringify(before[field]);
       const valueAfter = JSON.stringify(after[field]);
+      if (valueBefore === valueAfter) continue;
       await this.env.DB.prepare(
         `INSERT INTO user_corrections
          (id, transaction_id, corrected_at, corrected_by, field_corrected, value_before, value_after, signal_text, note, superseded_by)
@@ -2233,7 +2235,7 @@ function subscriptionText(row: Record<string, unknown>): string {
 }
 
 function isSubscriptionBlocked(text: string, category: string): boolean {
-  if (["transfers", "fees", "dining_offset"].includes(category)) return true;
+  if (["transfers", "fees", "dining_offset", "rewards", "cash_advance", "debt_collection"].includes(category)) return true;
   if (category === "dining" && /\bapple\b/i.test(text)) return true;
   return /\b(interest|payment|ach pmt|e-payment|epayment|adjustment|late fee|returned payment|return payment|gas|fuel|doordash|grubhub|uber eats|restaurant|mcdonald|costco gas)\b/i.test(text);
 }
