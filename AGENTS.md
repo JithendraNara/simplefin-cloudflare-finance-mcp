@@ -46,6 +46,13 @@ Agent usage rules:
   aggregating transaction search results.
 - Use `detect_recurring_obligations` for monthly commitments beyond basic
   subscriptions, including recurring fees and BNPL/installment-like spend.
+- Use `list_corrections` and `get_eval_history` when evaluating categorization
+  quality. Admin agents can use `correct_transaction`,
+  `label_eval_transaction`, and `run_eval` to create a measurable feedback
+  loop.
+- Corrections are stored in D1, feed future categorization prompts as
+  few-shot examples, and refresh the affected transaction's Vectorize
+  embedding.
 - Use `simplefin_raw_account` only for one `accountId` at a time with a narrow `limit`.
 - Prefer summaries and search tools over loading all transactions into context.
 - Keep [README.md](README.md) focused on positioning, sample output, and

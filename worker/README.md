@@ -203,6 +203,12 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 - `detect_recurring_obligations`
 - `merchant_summary`
 - `categorize_uncategorized_transactions`
+- `correct_transaction` (admin only)
+- `undo_correction` (admin only)
+- `label_eval_transaction` (admin only)
+- `run_eval` (admin only)
+- `list_corrections`
+- `get_eval_history`
 - `find_unusual_transactions`
 - `generate_weekly_money_briefing`
 - `refresh_insights`
@@ -237,6 +243,13 @@ large raw transaction windows.
 
 `detect_recurring_obligations` extends `detect_subscriptions` with recurring
 fees and other obligation-like spend such as BNPL/installments.
+
+Learning feedback is D1-backed. `correct_transaction` records before/after
+values in `user_corrections`, refreshes the corrected transaction's Vectorize
+embedding, and feeds recent corrections into future categorization prompts.
+`label_eval_transaction` and `run_eval` create calibration history in
+`eval_labels` and `eval_runs`, so confidence values can be measured instead of
+treated as decorative model output.
 
 ## Secure Operational Audit
 

@@ -8,7 +8,7 @@ import { daysBefore, today } from "./http.js";
 import { FinanceRepository } from "./repository.js";
 import { syncSimpleFin } from "./sync.js";
 import type { Env, ToolAuth } from "./types.js";
-import { indexTransactions, semanticSearch } from "./vectorize.js";
+import { indexTransactions, reindexTransaction, semanticSearch } from "./vectorize.js";
 
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional();
 
@@ -294,7 +294,114 @@ export function createFinanceMcpServer(env: Env, auth: ToolAuth): McpServer {
         return result(await categorizeTransactions(env, repo, limit));
       }
     );
+
+    server.registerTool(
+      "correct_transaction",
+      {
+        title: "Correct Transaction",
+        description: "Admin-only. Correct a transaction category, merchant key, or subscription flag; logs the correction and refreshes its semantic index vector.",
+        inputSchema: {
+          transactionId: z.string().min(1),
+          corrections: z.object({
+            category: z.string().optional(),
+            merchant_normalized: z.string().optional(),
+            is_subscription_candidate: z.boolean().optional()
+          }),
+          note: z.string().optional()
+        }
+      },
+      async ({ transactionId, corrections, note }) => {
+        requireAdmin(auth);
+        const corrected = await repo.correctTransaction({
+          transactionId,
+          corrections,
+          note,
+          correctedBy: auth.login ?? auth.authType ?? "admin"
+        });
+        const indexing = await reindexTransaction(env, repo, transactionId);
+        return result({ ...corrected, indexing });
+      }
+    );
+
+    server.registerTool(
+      "undo_correction",
+      {
+        title: "Undo Correction",
+        description: "Admin-only. Undo one prior correction and log the undo as a new correction event.",
+        inputSchema: {
+          correctionId: z.string().min(1)
+        }
+      },
+      async ({ correctionId }) => {
+        requireAdmin(auth);
+        const undone = await repo.undoCorrection(correctionId, auth.login ?? auth.authType ?? "admin");
+        const transaction = undone.updated_transaction as Record<string, unknown> | undefined;
+        const indexing = typeof transaction?.id === "string"
+          ? await reindexTransaction(env, repo, transaction.id)
+          : null;
+        return result({ ...undone, indexing });
+      }
+    );
+
+    server.registerTool(
+      "label_eval_transaction",
+      {
+        title: "Label Eval Transaction",
+        description: "Admin-only. Add or update a hand-labeled eval row for calibration.",
+        inputSchema: {
+          transactionId: z.string().min(1),
+          correctCategory: z.string().min(1),
+          correctMerchantNormalized: z.string().min(1),
+          correctIsSubscription: z.boolean(),
+          notes: z.string().optional()
+        }
+      },
+      async (args) => {
+        requireAdmin(auth);
+        return result(await repo.labelEvalTransaction({ ...args, labeledBy: auth.login ?? auth.authType ?? "admin" }));
+      }
+    );
+
+    server.registerTool(
+      "run_eval",
+      {
+        title: "Run Eval",
+        description: "Admin-only. Run calibration metrics against hand-labeled eval rows.",
+        inputSchema: {
+          modelVersion: z.string().optional()
+        }
+      },
+      async ({ modelVersion }) => {
+        requireAdmin(auth);
+        return result(await repo.runEval({ modelVersion }));
+      }
+    );
   }
+
+  server.registerTool(
+    "list_corrections",
+    {
+      title: "List Corrections",
+      description: "List recent user corrections that teach the categorizer.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(50),
+        since: dateSchema
+      }
+    },
+    async (args) => result(await repo.listCorrections(args))
+  );
+
+  server.registerTool(
+    "get_eval_history",
+    {
+      title: "Get Eval History",
+      description: "Return recent categorization calibration eval runs.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(50).default(10)
+      }
+    },
+    async (args) => result(await repo.getEvalHistory(args))
+  );
 
   server.registerTool(
     "find_unusual_transactions",
@@ -395,6 +502,7 @@ function agentGuidance(auth: ToolAuth): Record<string, unknown> {
 	      search_rule: "Use search_transactions or semantic_transaction_search for merchant/topic followups instead of loading all transactions.",
 	      merchant_rule: "Use merchant_summary for merchant-specific questions instead of manually aggregating search results.",
 	      recurring_rule: "Use detect_recurring_obligations when the user asks about recurring monthly commitments beyond subscriptions.",
+	      learning_rule: "Use list_corrections and get_eval_history when judging categorization quality; admins can call correct_transaction and run_eval to improve and measure the system.",
 	      sync_rule: "Do not sync before every question. The Worker syncs daily with a 3-day overlap; new/problem accounts get account-specific 90-day backfill."
 	    },
     permissions: authContext(auth),

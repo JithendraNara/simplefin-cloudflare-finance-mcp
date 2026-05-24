@@ -130,6 +130,8 @@ pattern, outliers, and recent rows.
 - `detect_subscriptions`
 - `detect_recurring_obligations`
 - `merchant_summary`
+- `list_corrections`
+- `get_eval_history`
 - `find_unusual_transactions`
 - `generate_weekly_money_briefing`
 
@@ -138,10 +140,23 @@ pattern, outliers, and recent rows.
 - `sync_simplefin`
 - `claim_setup_token`
 - `categorize_uncategorized_transactions`
+- `correct_transaction`
+- `undo_correction`
+- `label_eval_transaction`
+- `run_eval`
 - `refresh_insights`
 - `worker_audit_events`
 
 Admin tools require either `ADMIN_TOKEN` or OAuth for the allowed GitHub login configured in `GITHUB_ALLOWED_LOGIN`.
+
+Corrections and calibration form the learning loop. `correct_transaction`
+updates a cached transaction's enrichment, records a before/after correction in
+D1, supersedes older corrections for the same transaction field, refreshes the
+transaction's Vectorize embedding, and feeds recent corrections into future
+categorization prompts. `label_eval_transaction`, `run_eval`, and
+`get_eval_history` let deployers measure category precision/recall,
+subscription quality, merchant exact-match accuracy, and confidence
+calibration over time.
 
 ## Operational Audit
 

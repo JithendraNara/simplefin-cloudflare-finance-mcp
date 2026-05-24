@@ -174,6 +174,8 @@ Read tools:
 - `detect_subscriptions`
 - `detect_recurring_obligations`
 - `merchant_summary`
+- `list_corrections`
+- `get_eval_history`
 - `find_unusual_transactions`
 - `generate_weekly_money_briefing`
 
@@ -182,10 +184,14 @@ Admin tools:
 - `sync_simplefin`
 - `claim_setup_token`
 - `categorize_uncategorized_transactions`
+- `correct_transaction`
+- `undo_correction`
+- `label_eval_transaction`
+- `run_eval`
 - `refresh_insights`
 
 Use `ADMIN_TOKEN` or the configured OAuth admin identity only for setup, sync,
-and refresh operations.
+refresh, correction, and eval operations.
 
 ## Quick Start
 

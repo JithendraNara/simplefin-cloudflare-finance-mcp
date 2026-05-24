@@ -27,6 +27,7 @@ export async function categorizeTransactions(env: Env, repo: FinanceRepository, 
     return { enriched: 0 };
   }
 
+  const correctionExamples = await repo.recentCorrectionExamples(20);
   let aiEnriched = 0;
   let fallbackEnriched = 0;
   const failures: string[] = [];
@@ -34,7 +35,7 @@ export async function categorizeTransactions(env: Env, repo: FinanceRepository, 
   for (let index = 0; index < transactions.length; index += CATEGORIZATION_BATCH_SIZE) {
     const batch = transactions.slice(index, index + CATEGORIZATION_BATCH_SIZE);
     try {
-      const prompt = buildCategorizationPrompt(batch);
+      const prompt = buildCategorizationPrompt(batch, correctionExamples);
       const output = await env.AI.run(model, {
         messages: [
           {
@@ -359,12 +360,17 @@ const unusualTransactionsSchema = {
   required: ["explanation", "transactions"]
 };
 
-function buildCategorizationPrompt(transactions: TransactionRow[]): string {
+function buildCategorizationPrompt(transactions: TransactionRow[], correctionExamples: Array<Record<string, unknown>> = []): string {
+  const correctionsBlock = correctionExamples.length > 0
+    ? `\nRecent user corrections. Apply the same logic to similar transactions:\n${formatCorrectionExamples(correctionExamples)}\n`
+    : "";
   return `Categorize these transactions into one of: income, housing, groceries, dining, dining_offset, transport, subscriptions, health, utilities, transfers, shopping, taxes, fees, entertainment, uncategorized.
 
 Return this exact JSON shape:
 {"transactions":[{"transaction_id":"...","category":"...","merchant_normalized":"...","is_subscription_candidate":false,"confidence":0.0,"ai_reason":"..."}]}
 
+ai_reason must be one short clause naming the signal used, not a restatement of the final category.
+${correctionsBlock}
 Transactions:
 ${JSON.stringify(transactions.map((transaction) => ({
     transaction_id: transaction.id,
@@ -376,6 +382,32 @@ ${JSON.stringify(transactions.map((transaction) => ({
     institution: transaction.org_name,
     posted_at: transaction.posted_at
   })), null, 2)}`;
+}
+
+function formatCorrectionExamples(corrections: Array<Record<string, unknown>>): string {
+  const grouped = new Map<string, string[]>();
+  for (const correction of corrections) {
+    const field = String(correction.field_corrected ?? "field");
+    const before = parsePromptValue(correction.value_before);
+    const after = parsePromptValue(correction.value_after);
+    const signal = String(correction.signal_text ?? "").replace(/\s+/g, " ").slice(0, 180);
+    const note = correction.note ? `; note: ${String(correction.note).slice(0, 120)}` : "";
+    const existing = grouped.get(field) ?? [];
+    existing.push(`- Description "${signal}" -> ${field} ${String(after)} (not ${String(before)})${note}`);
+    grouped.set(field, existing);
+  }
+  return [...grouped.entries()]
+    .map(([field, examples]) => `${field} corrections:\n${examples.slice(0, 8).join("\n")}`)
+    .join("\n");
+}
+
+function parsePromptValue(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
 }
 
 function normalizeEnrichments(parsed: Record<string, unknown>, transactions: TransactionRow[], model: string): Enrichment[] {
@@ -454,11 +486,13 @@ function normalizeAiReason(reason: string, category: string, confidence: number)
 
 function guardedCategory(text: string, payee: string, amount: number): string | null {
   if (amount > 0 && /\b(dining credit|restaurant credit|uber cash)\b/.test(text)) return "dining_offset";
+  if (/\b(internet transfer|account ending in \d+)\b/.test(text) || /\bach deposit\b.*\btransfer\b/.test(text)) return "transfers";
   if (amount > 0) return null;
   if (/\b(apple online store|apple store)\b/.test(text)) return "shopping";
+  if (/\bapple\.com\/bill\b/.test(text)) return "subscriptions";
   if (/\b(uber eats|doordash|grubhub|restaurant|cafe|coffee|starbucks|chipotle|mcdonald|dunkin|taco|pizza)\b/.test(text)) return "dining";
   if (/\b(cbankus\.com|continental bank zolve)\b/.test(text)) return "uncategorized";
-  if (/\b(fee|interest charge|purchase interest|late fee|returned payment|return payment|annual fee|credit protect)\b/.test(text)) return "fees";
+  if (/\b(fee|interest|interest charge|purchase interest|late fee|returned payment|return payment|annual fee|credit protect)\b/.test(text)) return "fees";
   if (/\b(uber one|netflix|spotify|google fi|claude\.ai subscription|openai|cloudflare|google cloud|perplexity|nous research|subscription|monthly|membership)\b/.test(text)) return "subscriptions";
   if (/\b(payment|credit card|autopay|ach pmt|e-payment|epayment|applecard gsbank|american express ach|discover e-payment|zolve pmt|adjustment-payments|adjustment payments)\b/.test(text)) return "transfers";
   if (/\b(geico|gas|shell|bp|exxon|parking|transit|uber|lyft)\b/.test(text) && !/\beats\b/.test(payee)) return "transport";
@@ -488,9 +522,10 @@ function deterministicEnrichment(transaction: TransactionRow, model: string, err
   const merchant = normalizeMerchant(preferredMerchant);
   const category =
     transaction.amount > 0 && /\b(dining credit|restaurant credit|uber cash|credit)\b/.test(lower) ? "dining_offset" :
+    /\b(internet transfer|account ending in \d+)\b/.test(lower) || /\bach deposit\b.*\btransfer\b/.test(lower) ? "transfers" :
     transaction.amount > 0 ? "income" :
     /\b(payment|transfer|credit card|autopay|zelle|venmo|cash app|ach pmt|e-payment|epayment)\b/.test(lower) ? "transfers" :
-    /\b(fee|interest charge|purchase interest|late fee|returned payment|return payment)\b/.test(lower) ? "fees" :
+    /\b(fee|interest|interest charge|purchase interest|late fee|returned payment|return payment)\b/.test(lower) ? "fees" :
     /\b(rent|mortgage|apartment|lease)\b/.test(lower) ? "housing" :
     /\b(costco|walmart|target|kroger|whole foods|aldi|trader joe|grocery)\b/.test(lower) ? "groceries" :
     /\b(uber eats|doordash|grubhub|restaurant|cafe|coffee|starbucks|chipotle|mcdonald|dunkin|taco|pizza)\b/.test(lower) ? "dining" :

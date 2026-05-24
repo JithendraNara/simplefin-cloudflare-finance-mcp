@@ -486,6 +486,7 @@ export class FinanceRepository {
     ).first();
 
     const lastSync = await this.latestSuccessfulSync();
+    const correctionStats = await this.correctionStats();
 
 	    return {
 	      period: { days, start_date: startDate, end_date: endDate },
@@ -497,6 +498,7 @@ export class FinanceRepository {
 	      data_quality: {
 	        ...integrity,
 	        ai_enrichment: await this.aiEnrichmentHealth(),
+	        corrections_count_30d: correctionStats.last_30_days,
 	        health_issues: await this.healthIssues()
 	      },
 	      last_sync: lastSync,
@@ -1179,6 +1181,328 @@ export class FinanceRepository {
     return results;
   }
 
+  async recentCorrectionExamples(limit = 20): Promise<Array<Record<string, unknown>>> {
+    const { results } = await this.env.DB.prepare(
+      `SELECT c.field_corrected, c.value_before, c.value_after, c.signal_text, c.note, c.corrected_at
+       FROM user_corrections c
+       WHERE c.superseded_by IS NULL
+       ORDER BY c.corrected_at DESC
+       LIMIT ?`
+    )
+      .bind(Math.max(1, Math.min(limit, 20)))
+      .all<Record<string, unknown>>();
+    return results;
+  }
+
+  async correctTransaction(options: {
+    transactionId: string;
+    corrections: {
+      category?: string;
+      merchant_normalized?: string;
+      is_subscription_candidate?: boolean;
+    };
+    note?: string;
+    correctedBy?: string;
+  }): Promise<Record<string, unknown>> {
+    const transaction = (await this.transactionsByIds([options.transactionId]))[0];
+    if (!transaction) throw new Error(`Transaction not found: ${options.transactionId}`);
+
+    const now = new Date().toISOString();
+    const signalText = transactionText(transaction).slice(0, 1000);
+    const before = {
+      category: String(transaction.category ?? "uncategorized"),
+      merchant_normalized: normalizeStoredMerchant(String(transaction.merchant_normalized ?? transaction.payee ?? transaction.description ?? "unknown")),
+      is_subscription_candidate: Boolean(transaction.is_subscription_candidate)
+    };
+    const after = {
+      category: options.corrections.category?.trim() || before.category,
+      merchant_normalized: options.corrections.merchant_normalized
+        ? normalizeStoredMerchant(options.corrections.merchant_normalized)
+        : before.merchant_normalized,
+      is_subscription_candidate: options.corrections.is_subscription_candidate ?? before.is_subscription_candidate
+    };
+
+    await this.env.DB.prepare(
+      `INSERT OR REPLACE INTO transaction_enrichment
+       (transaction_id, category, merchant_normalized, is_subscription_candidate, confidence, ai_reason, enriched_at, model)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        transaction.id,
+        after.category,
+        after.merchant_normalized,
+        after.is_subscription_candidate ? 1 : 0,
+        1,
+        `User correction accepted; stored category is authoritative.`,
+        now,
+        "user-correction"
+      )
+      .run();
+
+    const correctionRows: Array<Record<string, unknown>> = [];
+    const fields: Array<keyof typeof after> = ["category", "merchant_normalized", "is_subscription_candidate"];
+    for (const field of fields) {
+      if (!(field in options.corrections)) continue;
+      const correctionId = crypto.randomUUID();
+      const valueBefore = JSON.stringify(before[field]);
+      const valueAfter = JSON.stringify(after[field]);
+      await this.env.DB.prepare(
+        `INSERT INTO user_corrections
+         (id, transaction_id, corrected_at, corrected_by, field_corrected, value_before, value_after, signal_text, note, superseded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+      )
+        .bind(
+          correctionId,
+          transaction.id,
+          now,
+          options.correctedBy ?? null,
+          field,
+          valueBefore,
+          valueAfter,
+          signalText,
+          options.note ?? null
+        )
+        .run();
+      await this.env.DB.prepare(
+        `UPDATE user_corrections
+         SET superseded_by = ?
+         WHERE transaction_id = ?
+           AND field_corrected = ?
+           AND superseded_by IS NULL
+           AND id <> ?`
+      )
+        .bind(correctionId, transaction.id, field, correctionId)
+        .run();
+      correctionRows.push({
+        id: correctionId,
+        transaction_id: transaction.id,
+        corrected_at: now,
+        corrected_by: options.correctedBy ?? null,
+        field_corrected: field,
+        value_before: before[field],
+        value_after: after[field],
+        signal_text: signalText,
+        note: options.note ?? null
+      });
+    }
+
+    const updated = (await this.transactionsByIds([transaction.id]))[0];
+    return {
+      updated_transaction: updated,
+      corrections: correctionRows,
+      correction_count: correctionRows.length
+    };
+  }
+
+  async listCorrections(options: { limit?: number; since?: string } = {}): Promise<Record<string, unknown>> {
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
+    const since = options.since ? `${options.since}T00:00:00.000Z` : "1970-01-01T00:00:00.000Z";
+    const { results } = await this.env.DB.prepare(
+      `SELECT
+        c.id,
+        c.transaction_id,
+        c.corrected_at,
+        c.corrected_by,
+        c.field_corrected,
+        c.value_before,
+        c.value_after,
+        c.signal_text,
+        c.note,
+        c.superseded_by,
+        t.amount,
+        t.description,
+        t.payee,
+        t.posted_at
+       FROM user_corrections c
+       LEFT JOIN transactions t ON t.id = c.transaction_id
+       WHERE c.corrected_at >= ?
+       ORDER BY c.corrected_at DESC
+       LIMIT ?`
+    )
+      .bind(since, limit)
+      .all<Record<string, unknown>>();
+    return {
+      corrections: results.map((row) => ({
+        ...row,
+        value_before: parseJsonValue(row.value_before),
+        value_after: parseJsonValue(row.value_after)
+      })),
+      count: results.length
+    };
+  }
+
+  async undoCorrection(correctionId: string, correctedBy?: string): Promise<Record<string, unknown>> {
+    const correction = await this.env.DB.prepare(
+      `SELECT * FROM user_corrections WHERE id = ? LIMIT 1`
+    )
+      .bind(correctionId)
+      .first<Record<string, unknown>>();
+    if (!correction) throw new Error(`Correction not found: ${correctionId}`);
+    const transaction = (await this.transactionsByIds([String(correction.transaction_id)]))[0];
+    if (!transaction) throw new Error(`Transaction not found: ${String(correction.transaction_id)}`);
+
+    const restoredValue = parseJsonValue(correction.value_before);
+    const current = {
+      category: String(transaction.category ?? "uncategorized"),
+      merchant_normalized: normalizeStoredMerchant(String(transaction.merchant_normalized ?? transaction.payee ?? transaction.description ?? "unknown")),
+      is_subscription_candidate: Boolean(transaction.is_subscription_candidate)
+    };
+    const restored = { ...current };
+    if (correction.field_corrected === "category") restored.category = String(restoredValue ?? "uncategorized");
+    if (correction.field_corrected === "merchant_normalized") restored.merchant_normalized = normalizeStoredMerchant(String(restoredValue ?? "unknown"));
+    if (correction.field_corrected === "is_subscription_candidate") restored.is_subscription_candidate = Boolean(restoredValue);
+
+    const now = new Date().toISOString();
+    const undoId = crypto.randomUUID();
+    await this.env.DB.prepare(
+      `INSERT OR REPLACE INTO transaction_enrichment
+       (transaction_id, category, merchant_normalized, is_subscription_candidate, confidence, ai_reason, enriched_at, model)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        transaction.id,
+        restored.category,
+        restored.merchant_normalized,
+        restored.is_subscription_candidate ? 1 : 0,
+        1,
+        `User correction undo accepted; restored previous ${String(correction.field_corrected)}.`,
+        now,
+        "user-correction"
+      )
+      .run();
+    await this.env.DB.prepare(
+      `INSERT INTO user_corrections
+       (id, transaction_id, corrected_at, corrected_by, field_corrected, value_before, value_after, signal_text, note, superseded_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+    )
+      .bind(
+        undoId,
+        transaction.id,
+        now,
+        correctedBy ?? null,
+        String(correction.field_corrected),
+        JSON.stringify(current[correction.field_corrected as keyof typeof current]),
+        JSON.stringify(restoredValue),
+        String(correction.signal_text ?? transactionText(transaction)).slice(0, 1000),
+        `Undo correction ${correctionId}`
+      )
+      .run();
+    await this.env.DB.prepare(
+      `UPDATE user_corrections SET superseded_by = ? WHERE id = ?`
+    )
+      .bind(undoId, correctionId)
+      .run();
+
+    const updated = (await this.transactionsByIds([transaction.id]))[0];
+    return {
+      undone_correction_id: correctionId,
+      undo_correction_id: undoId,
+      updated_transaction: updated
+    };
+  }
+
+  async labelEvalTransaction(options: {
+    transactionId: string;
+    correctCategory: string;
+    correctMerchantNormalized: string;
+    correctIsSubscription: boolean;
+    labeledBy?: string;
+    notes?: string;
+  }): Promise<Record<string, unknown>> {
+    const transaction = (await this.transactionsByIds([options.transactionId]))[0];
+    if (!transaction) throw new Error(`Transaction not found: ${options.transactionId}`);
+    const id = crypto.randomUUID();
+    const labeledAt = new Date().toISOString();
+    await this.env.DB.prepare(
+      `INSERT INTO eval_labels
+       (id, transaction_id, correct_category, correct_merchant_normalized, correct_is_subscription, labeled_at, labeled_by, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(transaction_id) DO UPDATE SET
+         correct_category = excluded.correct_category,
+         correct_merchant_normalized = excluded.correct_merchant_normalized,
+         correct_is_subscription = excluded.correct_is_subscription,
+         labeled_at = excluded.labeled_at,
+         labeled_by = excluded.labeled_by,
+         notes = excluded.notes`
+    )
+      .bind(
+        id,
+        transaction.id,
+        options.correctCategory,
+        normalizeStoredMerchant(options.correctMerchantNormalized),
+        options.correctIsSubscription ? 1 : 0,
+        labeledAt,
+        options.labeledBy ?? null,
+        options.notes ?? null
+      )
+      .run();
+    return {
+      labeled: true,
+      transaction_id: transaction.id,
+      correct_category: options.correctCategory,
+      correct_merchant_normalized: normalizeStoredMerchant(options.correctMerchantNormalized),
+      correct_is_subscription: options.correctIsSubscription,
+      labeled_at: labeledAt
+    };
+  }
+
+  async runEval(options: { modelVersion?: string } = {}): Promise<Record<string, unknown>> {
+    const { results } = await this.env.DB.prepare(
+      `SELECT
+        l.transaction_id,
+        l.correct_category,
+        l.correct_merchant_normalized,
+        l.correct_is_subscription,
+        COALESCE(e.category, 'uncategorized') AS predicted_category,
+        COALESCE(e.merchant_normalized, '') AS predicted_merchant_normalized,
+        COALESCE(e.is_subscription_candidate, 0) AS predicted_is_subscription,
+        COALESCE(e.confidence, 0) AS confidence
+       FROM eval_labels l
+       LEFT JOIN transaction_enrichment e ON e.transaction_id = l.transaction_id`
+    )
+      .all<Record<string, unknown>>();
+    const summary = buildEvalSummary(results);
+    const startedAt = new Date().toISOString();
+    const run = {
+      id: crypto.randomUUID(),
+      started_at: startedAt,
+      model: options.modelVersion ?? "stored-enrichment",
+      prompt_hash: stableHash(JSON.stringify(summary.category_counts ?? {})),
+      label_count: results.length,
+      results: summary
+    };
+    await this.env.DB.prepare(
+      `INSERT INTO eval_runs (id, started_at, model, prompt_hash, label_count, results_json)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+      .bind(run.id, run.started_at, run.model, run.prompt_hash, run.label_count, JSON.stringify(run.results))
+      .run();
+    return run;
+  }
+
+  async getEvalHistory(options: { limit?: number } = {}): Promise<Record<string, unknown>> {
+    const limit = Math.max(1, Math.min(options.limit ?? 10, 50));
+    const { results } = await this.env.DB.prepare(
+      `SELECT id, started_at, model, prompt_hash, label_count, results_json
+       FROM eval_runs
+       ORDER BY started_at DESC
+       LIMIT ?`
+    )
+      .bind(limit)
+      .all<Record<string, unknown>>();
+    return {
+      eval_runs: results.map((row) => ({
+        id: row.id,
+        started_at: row.started_at,
+        model: row.model,
+        prompt_hash: row.prompt_hash,
+        label_count: row.label_count,
+        results: safeJson(row.results_json)
+      })),
+      count: results.length
+    };
+  }
+
   async saveEnrichments(enrichments: Enrichment[]): Promise<void> {
     for (const enrichment of enrichments) {
       await this.env.DB.prepare(
@@ -1253,6 +1577,8 @@ export class FinanceRepository {
     )
       .bind(LOW_CONFIDENCE_THRESHOLD)
       .first<Record<string, unknown>>();
+    const corrections = await this.correctionStats();
+    const calibration = await this.latestCalibration();
     const transactions = Number(row?.transactions ?? 0);
     const fallback = Number(row?.fallback_enriched ?? 0);
     return {
@@ -1271,7 +1597,52 @@ export class FinanceRepository {
         "0.7-0.9": Number(row?.confidence_70_90 ?? 0),
         "0.9-1.0": Number(row?.confidence_90_100 ?? 0)
       },
+      corrections_total: corrections.total,
+      corrections_30d: corrections.last_30_days,
+      corrections_applied_today: corrections.today,
+      calibration,
       healthy: transactions === 0 || fallback / transactions < 0.25
+    };
+  }
+
+  async correctionStats(): Promise<Record<string, number>> {
+    const todayStart = new Date();
+    todayStart.setUTCHours(0, 0, 0, 0);
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setUTCDate(thirtyDaysAgo.getUTCDate() - 30);
+    const row = await this.env.DB.prepare(
+      `SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN corrected_at >= ? THEN 1 ELSE 0 END) AS today,
+        SUM(CASE WHEN corrected_at >= ? THEN 1 ELSE 0 END) AS last_30_days
+       FROM user_corrections`
+    )
+      .bind(todayStart.toISOString(), thirtyDaysAgo.toISOString())
+      .first<Record<string, unknown>>();
+    return {
+      total: Number(row?.total ?? 0),
+      today: Number(row?.today ?? 0),
+      last_30_days: Number(row?.last_30_days ?? 0)
+    };
+  }
+
+  async latestCalibration(): Promise<Record<string, unknown> | null> {
+    const row = await this.env.DB.prepare(
+      `SELECT id, started_at, label_count, results_json
+       FROM eval_runs
+       ORDER BY started_at DESC
+       LIMIT 1`
+    ).first<Record<string, unknown>>();
+    if (!row) return null;
+    const results = safeJson(row.results_json) as Record<string, unknown>;
+    return {
+      eval_run_id: row.id,
+      started_at: row.started_at,
+      label_count: row.label_count,
+      confidence_calibration: results.confidence_calibration ?? null,
+      category_macro_f1: results.category_macro_f1 ?? null,
+      merchant_exact_match_accuracy: results.merchant_exact_match_accuracy ?? null,
+      subscription_f1: results.subscription_f1 ?? null
     };
   }
 
@@ -1327,6 +1698,16 @@ export class FinanceRepository {
         source: "ai_enrichment",
         message: `${ai.quota_fallback} transactions fell back because the daily AI item limit was reached.`,
         actionable_hint: "Retry after the daily AI quota window resets or lower batch size."
+      });
+    }
+    const confidenceDistribution = ai.confidence_distribution as Record<string, unknown> | undefined;
+    const uncertainRows = Number(confidenceDistribution?.["0.5-0.7"] ?? 0) + Number(ai.low_confidence_enriched ?? 0);
+    if (uncertainRows > 0 && Number(ai.corrections_30d ?? 0) === 0) {
+      issues.push({
+        severity: "info",
+        source: "learning_feedback",
+        message: `${uncertainRows} enriched transaction(s) are below the confidence review threshold and no corrections were recorded in the last 30 days.`,
+        actionable_hint: "Use list_corrections and correct_transaction to teach recurring categorization mistakes."
       });
     }
 
@@ -1532,6 +1913,7 @@ function canonicalMerchantDisplay(value: string): string {
   if (normalized === "openai") return "OpenAI";
   if (normalized === "google fi wireless") return "Google Fi Wireless";
   if (normalized === "cloudflare") return "Cloudflare";
+  if (normalized === "apple.com/bill") return "Apple.com/Bill";
   return value
     .split(/\s+/)
     .map((part) => part.length <= 3 && part === part.toUpperCase() ? part : part.charAt(0).toUpperCase() + part.slice(1))
@@ -1645,6 +2027,124 @@ function safeJson(value: unknown): unknown {
 function safeJsonArray(value: unknown): unknown[] {
   const parsed = safeJson(value);
   return Array.isArray(parsed) ? parsed : [];
+}
+
+function parseJsonValue(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function buildEvalSummary(rows: Record<string, unknown>[]): Record<string, unknown> {
+  if (rows.length === 0) {
+    return {
+      status: "no_labels",
+      label_count: 0,
+      message: "Add eval labels with label_eval_transaction before running calibration."
+    };
+  }
+
+  const categoryStats = new Map<string, { tp: number; fp: number; fn: number }>();
+  const calibration = new Map<string, { total: number; correct: number }>();
+  const ensureCategory = (category: string) => {
+    if (!categoryStats.has(category)) categoryStats.set(category, { tp: 0, fp: 0, fn: 0 });
+    return categoryStats.get(category)!;
+  };
+  let categoryCorrect = 0;
+  let merchantMatches = 0;
+  let subscriptionCorrect = 0;
+  let subTp = 0;
+  let subFp = 0;
+  let subFn = 0;
+
+  for (const row of rows) {
+    const correctCategory = String(row.correct_category ?? "uncategorized");
+    const predictedCategory = String(row.predicted_category ?? "uncategorized");
+    const categoryMatch = correctCategory === predictedCategory;
+    if (categoryMatch) {
+      ensureCategory(correctCategory).tp += 1;
+      categoryCorrect += 1;
+    } else {
+      ensureCategory(predictedCategory).fp += 1;
+      ensureCategory(correctCategory).fn += 1;
+    }
+
+    const confidence = Number(row.confidence ?? 0);
+    const band = confidenceBand(confidence);
+    const bucket = calibration.get(band) ?? { total: 0, correct: 0 };
+    bucket.total += 1;
+    if (categoryMatch) bucket.correct += 1;
+    calibration.set(band, bucket);
+
+    const correctMerchant = normalizeStoredMerchant(String(row.correct_merchant_normalized ?? ""));
+    const predictedMerchant = normalizeStoredMerchant(String(row.predicted_merchant_normalized ?? ""));
+    if (correctMerchant === predictedMerchant) merchantMatches += 1;
+
+    const correctSub = Boolean(Number(row.correct_is_subscription ?? 0));
+    const predictedSub = Boolean(Number(row.predicted_is_subscription ?? 0));
+    if (correctSub === predictedSub) subscriptionCorrect += 1;
+    if (correctSub && predictedSub) subTp += 1;
+    if (!correctSub && predictedSub) subFp += 1;
+    if (correctSub && !predictedSub) subFn += 1;
+  }
+
+  const categoryMetrics = Object.fromEntries([...categoryStats.entries()].map(([category, stats]) => {
+    const precision = stats.tp + stats.fp > 0 ? stats.tp / (stats.tp + stats.fp) : 0;
+    const recall = stats.tp + stats.fn > 0 ? stats.tp / (stats.tp + stats.fn) : 0;
+    const f1 = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
+    return [category, {
+      true_positive: stats.tp,
+      false_positive: stats.fp,
+      false_negative: stats.fn,
+      precision: roundScore(precision),
+      recall: roundScore(recall),
+      f1: roundScore(f1)
+    }];
+  }));
+  const categoryF1Values = Object.values(categoryMetrics).map((value) => Number((value as Record<string, unknown>).f1 ?? 0));
+  const subscriptionPrecision = subTp + subFp > 0 ? subTp / (subTp + subFp) : 0;
+  const subscriptionRecall = subTp + subFn > 0 ? subTp / (subTp + subFn) : 0;
+  const subscriptionF1 = subscriptionPrecision + subscriptionRecall > 0
+    ? (2 * subscriptionPrecision * subscriptionRecall) / (subscriptionPrecision + subscriptionRecall)
+    : 0;
+
+  return {
+    status: "ok",
+    label_count: rows.length,
+    category_accuracy: roundScore(categoryCorrect / rows.length),
+    category_macro_f1: roundScore(categoryF1Values.length ? averageOf(categoryF1Values) : 0),
+    category_metrics: categoryMetrics,
+    confidence_calibration: Object.fromEntries([...calibration.entries()].map(([band, stats]) => [
+      band,
+      { rows: stats.total, precision: roundScore(stats.correct / stats.total) }
+    ])),
+    merchant_exact_match_accuracy: roundScore(merchantMatches / rows.length),
+    subscription_accuracy: roundScore(subscriptionCorrect / rows.length),
+    subscription_precision: roundScore(subscriptionPrecision),
+    subscription_recall: roundScore(subscriptionRecall),
+    subscription_f1: roundScore(subscriptionF1)
+  };
+}
+
+function confidenceBand(confidence: number): string {
+  if (confidence < 0.5) return "0.0-0.5";
+  if (confidence < 0.6) return "0.5-0.6";
+  if (confidence < 0.7) return "0.6-0.7";
+  if (confidence < 0.8) return "0.7-0.8";
+  if (confidence < 0.9) return "0.8-0.9";
+  return "0.9-1.0";
+}
+
+function stableHash(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function detectSubscriptionCandidates(rows: Record<string, unknown>[]): Array<Record<string, unknown>> {
@@ -1777,6 +2277,7 @@ export function canonicalMerchantKey(value: string): string {
   if (/\b(annual fee)\b/.test(normalized)) return "annual fee";
   if (/\b(service fee|monthly service fee)\b/.test(normalized)) return "service fee";
   if (/\bgoogle\b.*\bfi\b|\bgoogle fi\b/.test(normalized)) return "google fi wireless";
+  if (/\bapple\.com\/bill\b/.test(normalized)) return "apple.com/bill";
   if (/\bdoor ?dash|doordash|dorodash|dd doordas/.test(normalized)) return "doordash";
   if (/\bopenai|chatgpt\b/.test(normalized)) return "openai";
   if (/\bcloudflare\b/.test(normalized)) return "cloudflare";

@@ -73,6 +73,33 @@ export async function semanticSearch(
   };
 }
 
+export async function reindexTransaction(env: Env, repo: FinanceRepository, transactionId: string): Promise<Record<string, unknown>> {
+  const embeddingModel = env.EMBEDDING_MODEL ?? "@cf/baai/bge-m3";
+  const transaction = (await repo.transactionsByIds([transactionId]))[0];
+  if (!transaction) throw new Error(`Transaction not found: ${transactionId}`);
+  const vector = await embedText(env, embeddingModel, transactionText(transaction));
+  const vectorId = vectorIdForTransaction(transaction.id);
+  await env.VECTOR_INDEX.upsert([
+    {
+      id: vectorId,
+      values: vector,
+      metadata: {
+        transaction_id: transaction.id,
+        account_id: transaction.account_id,
+        category: transaction.category ?? "uncategorized"
+      }
+    }
+  ]);
+  await repo.saveSemanticIndexJob(transaction.id, vectorId, embeddingModel);
+  await repo.saveAiUsage("semantic_reindex_transaction", embeddingModel, 1, "ok");
+  return {
+    indexed: 1,
+    transaction_id: transaction.id,
+    vector_id: vectorId,
+    model: embeddingModel
+  };
+}
+
 async function embedText(env: Env, model: string, text: string): Promise<number[]> {
   const output = await env.AI.run(model, { text, truncate_inputs: true });
   if (output && typeof output === "object") {
