@@ -28,6 +28,8 @@ no Cloudflare resource IDs, and no personal deployment history.
 - Workers AI transaction categorization and weekly briefings
 - Honest AI health counters: real AI enrichments, deterministic fallbacks, parse failures, quota fallbacks, and low-confidence rows
 - Deterministic category guardrails for obvious payments, fees, subscriptions, dining, and one-off purchases
+- Canonical merchant keys for grouping/search, with processor-code cleanup and common synonym mapping
+- Merchant-level summaries and recurring obligation detection beyond basic subscriptions
 - Vectorize semantic transaction search using `@cf/baai/bge-m3` embeddings and a 1024-dimensional cosine index
 - Raw SimpleFIN diagnostics scoped to one account at a time
 - Sanitized D1 audit timing for MCP/HTTP operations without storing prompts, tool args, finance payloads, or tokens
@@ -59,6 +61,13 @@ The main dashboard tool is designed to be safe for first-call agent context:
     "parse_fallback": 0,
     "quota_fallback": 0,
     "low_confidence_enriched": 9,
+    "low_confidence_threshold": 0.75,
+    "confidence_distribution": {
+      "0.0-0.5": 0,
+      "0.5-0.7": 2,
+      "0.7-0.9": 117,
+      "0.9-1.0": 9
+    },
     "healthy": true
   },
   "data_quality": {
@@ -73,6 +82,8 @@ More sanitized examples live in [docs/examples](docs/examples):
 - [finance_overview.json](docs/examples/finance_overview.json)
 - [worker_operational_status.json](docs/examples/worker_operational_status.json)
 - [detect_subscriptions.json](docs/examples/detect_subscriptions.json)
+- [detect_recurring_obligations.json](docs/examples/detect_recurring_obligations.json)
+- [merchant_summary.json](docs/examples/merchant_summary.json)
 - [find_unusual_transactions.json](docs/examples/find_unusual_transactions.json)
 - [generate_weekly_money_briefing.json](docs/examples/generate_weekly_money_briefing.json)
 
@@ -161,6 +172,8 @@ Read tools:
 - `semantic_transaction_search`
 - `summarize_cashflow`
 - `detect_subscriptions`
+- `detect_recurring_obligations`
+- `merchant_summary`
 - `find_unusual_transactions`
 - `generate_weekly_money_briefing`
 

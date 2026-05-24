@@ -7,6 +7,8 @@ import {
   transactionTransactedAt
 } from "./simplefin.js";
 
+const LOW_CONFIDENCE_THRESHOLD = 0.75;
+
 export class FinanceRepository {
   constructor(private readonly env: Env) {}
 
@@ -441,7 +443,7 @@ export class FinanceRepository {
        GROUP BY LOWER(merchant), category
        HAVING spending > 0
        ORDER BY spending DESC
-       LIMIT 10`
+       LIMIT 100`
     )
       .bind(startEpoch)
       .all();
@@ -456,12 +458,19 @@ export class FinanceRepository {
        WHERE t.amount < 0
          AND COALESCE(t.posted_at, t.transacted_at, 0) >= ?
          AND (
-           LOWER(COALESCE(t.description, '') || ' ' || COALESCE(t.payee, '') || ' ' || COALESCE(t.memo, '') || ' ' || COALESCE(e.category, '') || ' ' || COALESCE(e.merchant_normalized, '')) LIKE '%fee%'
-           OR LOWER(COALESCE(t.description, '') || ' ' || COALESCE(e.merchant_normalized, '')) LIKE '%interest%'
+           LOWER(COALESCE(t.description, '') || ' ' || COALESCE(t.payee, '') || ' ' || COALESCE(t.memo, '') || ' ' || COALESCE(e.merchant_normalized, '')) LIKE '%interest%'
+           OR LOWER(COALESCE(t.description, '') || ' ' || COALESCE(t.payee, '') || ' ' || COALESCE(t.memo, '') || ' ' || COALESCE(e.merchant_normalized, '')) LIKE '%late fee%'
+           OR LOWER(COALESCE(t.description, '') || ' ' || COALESCE(t.payee, '') || ' ' || COALESCE(t.memo, '') || ' ' || COALESCE(e.merchant_normalized, '')) LIKE '%returned payment%'
+           OR LOWER(COALESCE(t.description, '') || ' ' || COALESCE(t.payee, '') || ' ' || COALESCE(t.memo, '') || ' ' || COALESCE(e.merchant_normalized, '')) LIKE '%return payment%'
+           OR LOWER(COALESCE(t.description, '') || ' ' || COALESCE(t.payee, '') || ' ' || COALESCE(t.memo, '') || ' ' || COALESCE(e.merchant_normalized, '')) LIKE '%annual fee%'
+           OR LOWER(COALESCE(t.description, '') || ' ' || COALESCE(t.payee, '') || ' ' || COALESCE(t.memo, '') || ' ' || COALESCE(e.merchant_normalized, '')) LIKE '%service fee%'
+           OR LOWER(COALESCE(t.description, '') || ' ' || COALESCE(t.payee, '') || ' ' || COALESCE(t.memo, '') || ' ' || COALESCE(e.merchant_normalized, '')) LIKE '%atm fee%'
+           OR LOWER(COALESCE(t.description, '') || ' ' || COALESCE(t.payee, '') || ' ' || COALESCE(t.memo, '') || ' ' || COALESCE(e.merchant_normalized, '')) LIKE '%foreign transaction%'
+           OR LOWER(COALESCE(t.description, '') || ' ' || COALESCE(t.payee, '') || ' ' || COALESCE(t.memo, '') || ' ' || COALESCE(e.merchant_normalized, '')) LIKE '%overdraft%'
          )
        GROUP BY fee
        ORDER BY total DESC
-       LIMIT 10`
+       LIMIT 100`
     )
       .bind(startEpoch)
       .all();
@@ -1018,6 +1027,129 @@ export class FinanceRepository {
     return { subscriptions: detectSubscriptionCandidates(results) };
   }
 
+  async detectRecurringObligations(): Promise<Record<string, unknown>> {
+    const { subscriptions } = await this.detectSubscriptions() as { subscriptions: Array<Record<string, unknown>> };
+    const { results } = await this.env.DB.prepare(
+      `SELECT
+        t.id,
+        t.amount,
+        t.description,
+        t.payee,
+        t.memo,
+        COALESCE(t.posted_at, t.transacted_at) AS occurred_at,
+        COALESCE(e.category, 'uncategorized') AS category,
+        COALESCE(e.merchant_normalized, ${merchantDisplaySql()}) AS merchant
+       FROM transactions t
+       LEFT JOIN transaction_enrichment e ON e.transaction_id = t.id
+       WHERE t.amount < 0
+       ORDER BY COALESCE(t.posted_at, t.transacted_at, 0) DESC
+       LIMIT 2000`
+    ).all<Record<string, unknown>>();
+
+    const subscriptionKeys = new Set(subscriptions.map((row) => normalizeMerchantKey(String(row.merchant_key ?? row.merchant ?? ""))));
+    const recurringFees = recurringObligationGroups(
+      results.filter((row) => isExplicitFeeText(obligationText(row))),
+      "recurring_fees",
+      subscriptionKeys
+    );
+    const recurringOther = recurringObligationGroups(
+      results.filter((row) => !isExplicitFeeText(obligationText(row)) && isRecurringOtherText(obligationText(row))),
+      "recurring_other",
+      subscriptionKeys
+    );
+    const monthlyEstimate = [
+      ...subscriptions.map((row) => Number(row.average_amount ?? 0)),
+      ...recurringFees.map((row) => Number(row.monthly_estimate ?? 0)),
+      ...recurringOther.map((row) => Number(row.monthly_estimate ?? 0))
+    ].reduce((sum, value) => sum + value, 0);
+
+    return {
+      monthly_estimate: roundMoney(monthlyEstimate),
+      buckets: {
+        subscriptions,
+        recurring_fees: recurringFees,
+        recurring_other: recurringOther
+      }
+    };
+  }
+
+  async merchantSummary(options: { merchant: string; days?: number }): Promise<Record<string, unknown>> {
+    const days = Math.max(1, Math.min(options.days ?? 90, 365));
+    const merchantKey = normalizeMerchantKey(options.merchant);
+    const endDate = new Date().toISOString().slice(0, 10);
+    const start = new Date(`${endDate}T00:00:00Z`);
+    start.setUTCDate(start.getUTCDate() - days + 1);
+    const startDate = start.toISOString().slice(0, 10);
+    const priorEnd = daysBefore(startDate, 1);
+    const priorStart = daysBefore(startDate, days);
+
+    const rows = await this.merchantTransactions(merchantKey, startDate, endDate, 1000);
+    const priorRows = await this.merchantTransactions(merchantKey, priorStart, priorEnd, 1000);
+    const spendingRows = rows.filter((row) => row.amount < 0);
+    const totalSpend = spendingRows.reduce((sum, row) => sum + Math.abs(row.amount), 0);
+    const priorSpend = priorRows.filter((row) => row.amount < 0).reduce((sum, row) => sum + Math.abs(row.amount), 0);
+    const accountDistribution = groupSummary(rows, (row) => String(row.account_name ?? row.account_id ?? "unknown"));
+    const categoryDistribution = groupSummary(rows, (row) => String(row.category ?? "uncategorized"));
+    const weekdayDistribution = groupSummary(rows, (row) => {
+      const epoch = row.posted_at ?? row.transacted_at ?? 0;
+      return epoch ? ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(epoch * 1000).getUTCDay()] : "unknown";
+    });
+    const merchantAmounts = spendingRows.map((row) => Math.abs(row.amount));
+    const merchantStats = statsFromNumbers(merchantAmounts);
+    const outliers = spendingRows
+      .map((row) => {
+        const amount = Math.abs(row.amount);
+        const zScore = merchantStats.stddev > 0 ? (amount - merchantStats.average) / merchantStats.stddev : 0;
+        return { ...row, amount_abs: roundMoney(amount), z_score: roundScore(zScore) };
+      })
+      .filter((row) => Number(row.z_score) >= 1.5 && Number(row.amount_abs) >= 25)
+      .sort((left, right) => Number(right.z_score) - Number(left.z_score))
+      .slice(0, 5);
+
+    return {
+      merchant: canonicalMerchantDisplay(merchantKey),
+      merchant_key: merchantKey,
+      period: { days, start_date: startDate, end_date: endDate },
+      totals: {
+        transaction_count: rows.length,
+        spending: roundMoney(totalSpend),
+        income_or_credits: roundMoney(rows.filter((row) => row.amount > 0).reduce((sum, row) => sum + row.amount, 0)),
+        average_ticket: spendingRows.length ? roundMoney(totalSpend / spendingRows.length) : 0
+      },
+      trend: {
+        current_period_spending: roundMoney(totalSpend),
+        prior_period_spending: roundMoney(priorSpend),
+        delta: roundMoney(totalSpend - priorSpend),
+        delta_pct: priorSpend > 0 ? roundScore(((totalSpend - priorSpend) / priorSpend) * 100) : null
+      },
+      account_distribution: accountDistribution,
+      category_distribution: categoryDistribution,
+      weekday_distribution: weekdayDistribution,
+      outliers,
+      recent_transactions: rows.slice(0, 25)
+    };
+  }
+
+  private async merchantTransactions(merchantKey: string, startDate: string, endDate: string, limit: number): Promise<TransactionRow[]> {
+    const search = `%${merchantKey}%`;
+    const { results } = await this.env.DB.prepare(
+      `${transactionSelectSql()}
+       WHERE COALESCE(t.posted_at, t.transacted_at, 0) >= ?
+         AND COALESCE(t.posted_at, t.transacted_at, 0) < ?
+         AND (
+           e.merchant_normalized = ?
+           OR LOWER(COALESCE(t.payee, '')) LIKE ?
+           OR LOWER(COALESCE(t.description, '')) LIKE ?
+           OR LOWER(COALESCE(t.memo, '')) LIKE ?
+         )
+       ORDER BY COALESCE(t.posted_at, t.transacted_at, 0) DESC
+       LIMIT ?`
+    )
+      .bind(dateToEpochNumber(startDate), dateToEpochNumber(addOneDay(endDate)), merchantKey, search, search, search, limit)
+      .all<TransactionRow>();
+    return results;
+  }
+
   async unenrichedTransactions(limit = 20): Promise<TransactionRow[]> {
     const { results } = await this.env.DB.prepare(
       `${transactionSelectSql()}
@@ -1112,9 +1244,15 @@ export class FinanceRepository {
         SUM(CASE WHEN e.ai_reason NOT LIKE 'Deterministic fallback%' THEN 1 ELSE 0 END) AS ai_enriched,
         SUM(CASE WHEN e.ai_reason LIKE '%daily_ai_item_limit_reached%' THEN 1 ELSE 0 END) AS quota_fallback,
         SUM(CASE WHEN e.ai_reason LIKE '%parseable JSON%' OR e.ai_reason LIKE '%JSON%' OR e.ai_reason LIKE '%SyntaxError%' THEN 1 ELSE 0 END) AS parse_fallback,
-        SUM(CASE WHEN e.confidence < 0.5 THEN 1 ELSE 0 END) AS low_confidence_enriched
+        SUM(CASE WHEN e.confidence < ? THEN 1 ELSE 0 END) AS low_confidence_enriched,
+        SUM(CASE WHEN e.confidence < 0.5 THEN 1 ELSE 0 END) AS confidence_0_50,
+        SUM(CASE WHEN e.confidence >= 0.5 AND e.confidence < 0.7 THEN 1 ELSE 0 END) AS confidence_50_70,
+        SUM(CASE WHEN e.confidence >= 0.7 AND e.confidence < 0.9 THEN 1 ELSE 0 END) AS confidence_70_90,
+        SUM(CASE WHEN e.confidence >= 0.9 THEN 1 ELSE 0 END) AS confidence_90_100
        FROM transaction_enrichment e`
-    ).first<Record<string, unknown>>();
+    )
+      .bind(LOW_CONFIDENCE_THRESHOLD)
+      .first<Record<string, unknown>>();
     const transactions = Number(row?.transactions ?? 0);
     const fallback = Number(row?.fallback_enriched ?? 0);
     return {
@@ -1126,6 +1264,13 @@ export class FinanceRepository {
       quota_fallback: Number(row?.quota_fallback ?? 0),
       parse_fallback: Number(row?.parse_fallback ?? 0),
       low_confidence_enriched: Number(row?.low_confidence_enriched ?? 0),
+      low_confidence_threshold: LOW_CONFIDENCE_THRESHOLD,
+      confidence_distribution: {
+        "0.0-0.5": Number(row?.confidence_0_50 ?? 0),
+        "0.5-0.7": Number(row?.confidence_50_70 ?? 0),
+        "0.7-0.9": Number(row?.confidence_70_90 ?? 0),
+        "0.9-1.0": Number(row?.confidence_90_100 ?? 0)
+      },
       healthy: transactions === 0 || fallback / transactions < 0.25
     };
   }
@@ -1365,7 +1510,7 @@ function mergeMerchantRows(rows: Record<string, unknown>[], nameField: "merchant
     }
     existing[amountField] = roundMoney(Number(existing[amountField] ?? 0) + Number(row[amountField] ?? 0));
     if (existing.transaction_count !== undefined || row.transaction_count !== undefined) {
-      existing.transaction_count = Number(existing.transaction_count ?? 0) + Number(row.transaction_count ?? 0);
+      existing.transaction_count = Number(existing.transaction_count ?? 0) + Number(row.transaction_count ?? row.count ?? 0);
     }
     if (existing.count !== undefined || row.count !== undefined) {
       existing.count = Number(existing.count ?? 0) + Number(row.count ?? 0);
@@ -1386,6 +1531,7 @@ function canonicalMerchantDisplay(value: string): string {
   if (normalized === "doordash") return "DoorDash";
   if (normalized === "openai") return "OpenAI";
   if (normalized === "google fi wireless") return "Google Fi Wireless";
+  if (normalized === "cloudflare") return "Cloudflare";
   return value
     .split(/\s+/)
     .map((part) => part.length <= 3 && part === part.toUpperCase() ? part : part.charAt(0).toUpperCase() + part.slice(1))
@@ -1399,6 +1545,12 @@ function dateToEpochNumber(value: string): number {
 function addOneDay(value: string): string {
   const date = new Date(`${value}T00:00:00Z`);
   date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+function daysBefore(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - days);
   return date.toISOString().slice(0, 10);
 }
 
@@ -1532,6 +1684,8 @@ function scoreSubscriptionGroup(merchantKey: string, group: Record<string, unkno
   const intervals = dates.slice(1).map((date, index) => Math.abs(date - dates[index]) / (24 * 60 * 60));
   const intervalAverage = intervals.length > 0 ? averageOf(intervals) : null;
   const intervalStddev = intervals.length > 1 && intervalAverage !== null ? stddevOf(intervals, intervalAverage) : null;
+  const expectedInterval = expectedSubscriptionIntervalDays(category, text);
+  const intervalAnomaly = intervalAverage !== null && intervalAverage > expectedInterval * 1.5;
 
   const amountStability = Math.max(0, 1 - Math.min(coefficientOfVariation, 1));
   const intervalRegularity = intervalStddev === null
@@ -1554,6 +1708,11 @@ function scoreSubscriptionGroup(merchantKey: string, group: Record<string, unkno
     coefficient_of_variation: roundScore(coefficientOfVariation),
     interval_average_days: intervalAverage === null ? null : roundScore(intervalAverage),
     interval_stddev_days: intervalStddev === null ? null : roundScore(intervalStddev),
+    expected_interval_days: expectedInterval,
+    interval_anomaly: intervalAnomaly,
+    interval_anomaly_hint: intervalAnomaly
+      ? `Observed ${roundScore(intervalAverage ?? 0)} day average interval; expected about ${expectedInterval} days. This may be a paused subscription, missing synced transaction, or card change.`
+      : null,
     occurrences,
     first_seen: epochToIso(dates[0]),
     last_seen: epochToIso(dates[dates.length - 1]),
@@ -1591,17 +1750,135 @@ function subscriptionCategoryPrior(category: string, text: string): number {
 }
 
 function normalizeMerchantKey(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim() || "unknown";
+  return canonicalMerchantKey(value);
 }
 
 function normalizeStoredMerchant(value: string): string {
-  const normalized = value
-    .replace(/[^a-zA-Z0-9\s.'&/-]/g, " ")
+  return canonicalMerchantKey(value);
+}
+
+export function canonicalMerchantKey(value: string): string {
+  let normalized = value
+    .toLowerCase()
+    .replace(/aplpay|applepay|apple pay/g, "apple pay ")
+    .replace(/\bbt\*?dd\b/g, " ")
+    .replace(/\bg\.co\s+helppay#?\b/g, " ")
+    .replace(/\b[a-z0-9]{4,8}\b(?=\s+(goo|google|g\.co|san|ca|ny|tx|fl|wa|il|oh|in)\b)/g, " ")
+    .replace(/\b(san francisco|new york|chicago|columbus|indianapolis|austin|seattle|ca|ny|tx|fl|wa|il|oh|in|usa)\b/g, " ")
+    .replace(/[^a-z0-9\s.'&/-]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 80)
-    .toLowerCase();
-  return normalized || "unknown";
+    .slice(0, 80);
+
+  if (!normalized) return "unknown";
+  if (/\b(interest|purchase interest|interest charge)\b/.test(normalized)) return "interest charge";
+  if (/\b(returned payment|return payment)\b/.test(normalized)) return "returned payment fee";
+  if (/\b(late fee)\b/.test(normalized)) return "late fee";
+  if (/\b(annual fee)\b/.test(normalized)) return "annual fee";
+  if (/\b(service fee|monthly service fee)\b/.test(normalized)) return "service fee";
+  if (/\bgoogle\b.*\bfi\b|\bgoogle fi\b/.test(normalized)) return "google fi wireless";
+  if (/\bdoor ?dash|doordash|dorodash|dd doordas/.test(normalized)) return "doordash";
+  if (/\bopenai|chatgpt\b/.test(normalized)) return "openai";
+  if (/\bcloudflare\b/.test(normalized)) return "cloudflare";
+  if (/\bperplexity|perplexit\b/.test(normalized)) return "perplexity";
+  if (/\bnous research\b/.test(normalized)) return "nous research";
+  if (/\bklarna\b/.test(normalized)) return "klarna";
+  if (/\buber one\b/.test(normalized)) return "uber";
+  return normalized;
+}
+
+function expectedSubscriptionIntervalDays(category: string, text: string): number {
+  if (/\b(annual|yearly)\b/i.test(text)) return 365;
+  if (/\b(weekly)\b/i.test(text)) return 7;
+  if (/\b(biweekly|every two weeks)\b/i.test(text)) return 14;
+  if (category === "utilities" || /\b(wireless|phone|internet|subscription|monthly|membership)\b/i.test(text)) return 30;
+  return 30;
+}
+
+function obligationText(row: Record<string, unknown>): string {
+  return [
+    row.merchant,
+    row.description,
+    row.payee,
+    row.memo,
+    row.category
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function isExplicitFeeText(text: string): boolean {
+  return /\b(interest|purchase interest|late fee|returned payment|return payment|annual fee|service fee|atm fee|foreign transaction|overdraft)\b/i.test(text);
+}
+
+function isRecurringOtherText(text: string): boolean {
+  return /\b(klarna|afterpay|affirm|sezzle|insurance|geico|wireless|utility|internet|phone|cloudflare|google cloud)\b/i.test(text);
+}
+
+function recurringObligationGroups(rows: Record<string, unknown>[], bucket: string, excludedKeys: Set<string>): Array<Record<string, unknown>> {
+  const groups = new Map<string, Record<string, unknown>[]>();
+  for (const row of rows) {
+    const key = normalizeMerchantKey(String(row.merchant ?? row.payee ?? row.description ?? "unknown"));
+    if (excludedKeys.has(key)) continue;
+    const existing = groups.get(key) ?? [];
+    existing.push(row);
+    groups.set(key, existing);
+  }
+  const candidates: Array<Record<string, unknown>> = [];
+  for (const [merchantKey, group] of groups.entries()) {
+    const amounts = group.map((row) => Math.abs(Number(row.amount ?? 0))).filter((value) => Number.isFinite(value) && value > 0);
+    if (amounts.length === 0) continue;
+    const text = group.map(obligationText).join(" ");
+    const average = averageOf(amounts);
+    const monthlyEstimate = /\bannual fee\b/i.test(text) ? average / 12 : average;
+    candidates.push({
+      bucket,
+      merchant_key: merchantKey,
+      merchant: canonicalMerchantDisplay(merchantKey),
+      average_amount: roundMoney(average),
+      monthly_estimate: roundMoney(monthlyEstimate),
+      occurrences: amounts.length,
+      avoidability: avoidabilityForObligation(text, bucket),
+      reason: obligationReason(text, bucket)
+    });
+  }
+  return candidates
+    .sort((left, right) => Number(right.monthly_estimate ?? 0) - Number(left.monthly_estimate ?? 0))
+    .slice(0, 20);
+}
+
+function avoidabilityForObligation(text: string, bucket: string): "high" | "medium" | "low" | "none" {
+  if (bucket === "recurring_fees" && /\b(interest|late fee|returned payment|return payment|service fee)\b/i.test(text)) return "high";
+  if (bucket === "recurring_other" && /\b(klarna|afterpay|affirm|sezzle)\b/i.test(text)) return "medium";
+  if (/\bannual fee\b/i.test(text)) return "low";
+  return "low";
+}
+
+function obligationReason(text: string, bucket: string): string {
+  if (bucket === "recurring_fees" && /\binterest\b/i.test(text)) return "Recurring interest charge.";
+  if (bucket === "recurring_fees" && /\b(returned payment|return payment)\b/i.test(text)) return "Returned payment fee pattern.";
+  if (bucket === "recurring_fees" && /\blate fee\b/i.test(text)) return "Late fee pattern.";
+  if (bucket === "recurring_other" && /\b(klarna|afterpay|affirm|sezzle)\b/i.test(text)) return "BNPL or installment-style obligation.";
+  return "Recurring or obligation-like merchant pattern.";
+}
+
+function groupSummary(rows: TransactionRow[], keyFn: (row: TransactionRow) => string): Array<Record<string, unknown>> {
+  const groups = new Map<string, { key: string; count: number; spending: number; net: number }>();
+  for (const row of rows) {
+    const key = keyFn(row);
+    const existing = groups.get(key) ?? { key, count: 0, spending: 0, net: 0 };
+    existing.count += 1;
+    if (row.amount < 0) existing.spending += Math.abs(row.amount);
+    existing.net += row.amount;
+    groups.set(key, existing);
+  }
+  return [...groups.values()]
+    .map((row) => ({ key: row.key, count: row.count, spending: roundMoney(row.spending), net: roundMoney(row.net) }))
+    .sort((left, right) => Number(right.spending) - Number(left.spending));
+}
+
+function statsFromNumbers(values: number[]): { count: number; average: number; stddev: number } {
+  if (values.length === 0) return { count: 0, average: 0, stddev: 0 };
+  const average = averageOf(values);
+  return { count: values.length, average, stddev: stddevOf(values, average) };
 }
 
 function averageOf(values: number[]): number {

@@ -40,8 +40,12 @@ Agent usage rules:
   should use human-safe issue messages so final prose does not repeat tool
   instructions.
 - Store `merchant_normalized` lowercase for stable per-row results and grouping;
-  prefer the SimpleFIN payee over model-generated merchant text when present;
-  display layers can canonicalize names separately.
+  strip common processor/code suffixes; map common synonyms such as `interest`
+  to `interest charge`; display layers can canonicalize names separately.
+- Use `merchant_summary` for merchant-specific questions instead of manually
+  aggregating transaction search results.
+- Use `detect_recurring_obligations` for monthly commitments beyond basic
+  subscriptions, including recurring fees and BNPL/installment-like spend.
 - Use `simplefin_raw_account` only for one `accountId` at a time with a narrow `limit`.
 - Prefer summaries and search tools over loading all transactions into context.
 - Keep [README.md](README.md) focused on positioning, sample output, and

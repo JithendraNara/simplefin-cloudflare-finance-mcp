@@ -1,0 +1,36 @@
+{
+  "monthly_estimate": 198.64,
+  "buckets": {
+    "subscriptions": [
+      {
+        "merchant": "Demo Streaming",
+        "average_amount": 19.99,
+        "interval_average_days": 30,
+        "interval_anomaly": false,
+        "score": 0.94
+      }
+    ],
+    "recurring_fees": [
+      {
+        "bucket": "recurring_fees",
+        "merchant": "Interest Charge",
+        "average_amount": 42.18,
+        "monthly_estimate": 42.18,
+        "occurrences": 3,
+        "avoidability": "high",
+        "reason": "Recurring interest charge."
+      }
+    ],
+    "recurring_other": [
+      {
+        "bucket": "recurring_other",
+        "merchant": "Klarna",
+        "average_amount": 33.33,
+        "monthly_estimate": 33.33,
+        "occurrences": 2,
+        "avoidability": "medium",
+        "reason": "BNPL or installment-style obligation."
+      }
+    ]
+  }
+}

@@ -256,6 +256,29 @@ export function createFinanceMcpServer(env: Env, auth: ToolAuth): McpServer {
     async () => result(await repo.detectSubscriptions())
   );
 
+  server.registerTool(
+    "detect_recurring_obligations",
+    {
+      title: "Detect Recurring Obligations",
+      description: "Find recurring subscriptions plus recurring fees and other obligation-like spend such as BNPL or utilities.",
+      inputSchema: {}
+    },
+    async () => result(await repo.detectRecurringObligations())
+  );
+
+  server.registerTool(
+    "merchant_summary",
+    {
+      title: "Merchant Summary",
+      description: "Summarize spending, trends, account distribution, categories, and outliers for one merchant.",
+      inputSchema: {
+        merchant: z.string().min(1),
+        days: z.number().int().min(1).max(365).default(90)
+      }
+    },
+    async ({ merchant, days }) => result(await repo.merchantSummary({ merchant, days }))
+  );
+
   if (auth.isAdmin) {
     server.registerTool(
       "categorize_uncategorized_transactions",
@@ -370,6 +393,8 @@ function agentGuidance(auth: ToolAuth): Record<string, unknown> {
 	      raw_account_rule: "Use simplefin_raw_account only for one accountId at a time; keep transaction limits narrow.",
 	      raw_transaction_rule: "Call get_transactions only for a narrow account/date/category question; prefer limit <= 100.",
 	      search_rule: "Use search_transactions or semantic_transaction_search for merchant/topic followups instead of loading all transactions.",
+	      merchant_rule: "Use merchant_summary for merchant-specific questions instead of manually aggregating search results.",
+	      recurring_rule: "Use detect_recurring_obligations when the user asks about recurring monthly commitments beyond subscriptions.",
 	      sync_rule: "Do not sync before every question. The Worker syncs daily with a 3-day overlap; new/problem accounts get account-specific 90-day backfill."
 	    },
     permissions: authContext(auth),

@@ -200,6 +200,8 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 - `semantic_transaction_search`
 - `summarize_cashflow`
 - `detect_subscriptions`
+- `detect_recurring_obligations`
+- `merchant_summary`
 - `categorize_uncategorized_transactions`
 - `find_unusual_transactions`
 - `generate_weekly_money_briefing`
@@ -209,19 +211,32 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 Weekly briefing generation requests structured JSON from Workers AI and retries
 once when the model returns invalid JSON. If both attempts fail, the Worker
 saves and returns a deterministic aggregate fallback instead of failing sync.
-Briefings receive current-period totals, prior-period totals, trailing-30-day
-fee totals, top subscriptions, unusual transactions, and human-safe
-`health.issues[]` messages so they can call out named merchants, amounts, data
-coverage issues, and concrete actions without repeating agent-only
-`actionable_hint` instructions.
+Briefings receive current-period totals, prior-period totals, an explicit
+comparison window, trailing-30-day fee totals, top subscriptions, unusual
+transactions, and human-safe `health.issues[]` messages so they can call out
+named merchants, amounts, date windows, data coverage issues, and concrete
+actions without repeating agent-only `actionable_hint` instructions.
 
 Transaction categorization uses structured Workers AI output plus deterministic
 guardrails for obvious card payments, returned payment fees, interest charges,
 known subscriptions, dining delivery, transport, and irregular merchants that
 should remain reviewable.
-The stored `merchant_normalized` value is lowercase by design; display layers
-can canonicalize names separately. When SimpleFIN provides a payee, that payee
-is preferred over model-generated merchant text to avoid spelling/case drift.
+The stored `merchant_normalized` value is lowercase by design. The canonicalizer
+strips common processor/code suffixes and maps common synonyms such as
+`interest` to `interest charge`. Display layers can canonicalize names
+separately.
+
+`worker_operational_status.ai_enrichment` includes a fixed
+`low_confidence_threshold` plus a `confidence_distribution` histogram. Use these
+instead of assuming `enriched_transactions == transactions` means
+categorization quality is healthy.
+
+`merchant_summary` provides merchant-specific totals, trend, account/category
+distribution, weekday pattern, outliers, and recent rows. Use it before loading
+large raw transaction windows.
+
+`detect_recurring_obligations` extends `detect_subscriptions` with recurring
+fees and other obligation-like spend such as BNPL/installments.
 
 ## Secure Operational Audit
 

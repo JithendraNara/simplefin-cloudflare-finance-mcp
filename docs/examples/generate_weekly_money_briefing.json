@@ -6,7 +6,14 @@
     "periodEnd": "2026-05-24",
     "kind": "weekly",
     "summaryJson": {
-      "summary_text": "You spent $412.34 this week. The largest avoidable item was a $12 returned payment fee, and your recurring Demo Streaming subscription remains steady at $19.99.",
+      "comparison_window": {
+        "label": "current period 2026-05-18 to 2026-05-24 vs prior period 2026-05-11 to 2026-05-17",
+        "current_period": { "start_date": "2026-05-18", "end_date": "2026-05-24", "spending": 412.34 },
+        "prior_period": { "start_date": "2026-05-11", "end_date": "2026-05-17", "spending": 390.12 },
+        "delta": 22.22,
+        "delta_pct": 5.7
+      },
+      "summary_text": "Comparison: 2026-05-18 to 2026-05-24 spending was $412.34 vs $390.12 for 2026-05-11 to 2026-05-17 (+5.7%). The largest avoidable item was a $12 returned payment fee, and your recurring Demo Streaming subscription remains steady at $19.99.",
       "insights": [
         {
           "merchant": "Returned Payment Fee",

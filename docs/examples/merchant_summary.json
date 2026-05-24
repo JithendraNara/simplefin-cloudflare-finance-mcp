@@ -1,0 +1,32 @@
+{
+  "merchant": "DoorDash",
+  "merchant_key": "doordash",
+  "period": {
+    "days": 90,
+    "start_date": "2026-02-24",
+    "end_date": "2026-05-24"
+  },
+  "totals": {
+    "transaction_count": 12,
+    "spending": 326.97,
+    "income_or_credits": 0,
+    "average_ticket": 27.25
+  },
+  "trend": {
+    "current_period_spending": 326.97,
+    "prior_period_spending": 211.42,
+    "delta": 115.55,
+    "delta_pct": 54.65
+  },
+  "account_distribution": [
+    { "key": "Demo Gold Card", "count": 10, "spending": 284.5, "net": -284.5 }
+  ],
+  "category_distribution": [
+    { "key": "dining", "count": 12, "spending": 326.97, "net": -326.97 }
+  ],
+  "weekday_distribution": [
+    { "key": "Fri", "count": 4, "spending": 112.34, "net": -112.34 }
+  ],
+  "outliers": [],
+  "recent_transactions": []
+}

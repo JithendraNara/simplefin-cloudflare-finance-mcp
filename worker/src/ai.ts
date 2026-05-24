@@ -1,5 +1,5 @@
 import type { Enrichment, Env, TransactionRow } from "./types.js";
-import { FinanceRepository, transactionText } from "./repository.js";
+import { canonicalMerchantKey, FinanceRepository, transactionText } from "./repository.js";
 
 const DAILY_AI_ITEM_LIMIT = 500;
 const MAX_BRIEFING_ATTEMPTS = 2;
@@ -93,6 +93,7 @@ export async function generateBriefing(
   const trailing30Start = daysBefore(periodEnd, 29);
   const priorSummary = await repo.summarizeCashflow({ startDate: priorStart, endDate: priorEnd });
   const trailing30Summary = await repo.summarizeCashflow({ startDate: trailing30Start, endDate: periodEnd });
+  const comparisonWindow = comparisonWindowFor(periodStart, periodEnd, summary, priorStart, priorEnd, priorSummary);
   const subscriptions = await repo.detectSubscriptions();
   const healthIssues = briefingHealthIssues(await repo.healthIssues());
   const compactSubscriptions = {
@@ -136,6 +137,7 @@ export async function generateBriefing(
       summary: trailing30Summary,
       top_fees: trailing30Fees
     },
+    comparison_window: comparisonWindow,
     prior_period: { start_date: priorStart, end_date: priorEnd, summary: priorSummary },
     subscriptions: compactSubscriptions,
     health_issues: healthIssues,
@@ -163,6 +165,8 @@ export async function generateBriefing(
         }
       } as AiTextGenerationInput);
       const parsed = validateBriefing(parseJsonObject(extractText(output)));
+      parsed.comparison_window = comparisonWindow;
+      parsed.summary_text = anchorSummaryText(String(parsed.summary_text), comparisonWindow);
       const briefing = await repo.saveBriefing({
         periodStart,
         periodEnd,
@@ -190,6 +194,7 @@ export async function generateBriefing(
       summaryJson: {
         summary,
         trailing_30_days: { start_date: trailing30Start, end_date: periodEnd, summary: trailing30Summary, top_fees: trailing30Fees },
+        comparison_window: comparisonWindow,
         prior_period: { start_date: priorStart, end_date: priorEnd, summary: priorSummary },
         subscriptions,
         health_issues: healthIssues,
@@ -317,7 +322,7 @@ Rules:
 - Mention active data coverage issues, such as Apple Card or SimpleFIN errlist warnings, when health_issues includes them.
 - Do not mention internal tool names or agent instructions in human prose.
 - Describe subscription insights by dollar impact and concrete action, not by active duration.
-- Compare to the prior period when useful.
+- When comparing periods, use comparison_window and name both windows and amounts.
 - Do not say "review spending" unless the action names a concrete merchant/account behavior.
 
 Data:
@@ -441,8 +446,8 @@ function briefingHealthIssues(issues: Array<Record<string, unknown>>): Array<Rec
 
 function normalizeAiReason(reason: string, category: string, confidence: number): string {
   const trimmed = reason.trim();
-  if (!trimmed || trimmed.length < 12 || /^[a-z_ -]+$/i.test(trimmed)) {
-    return `AI categorized transaction as '${category}' with confidence ${Math.round(confidence * 100)}%.`;
+  if (!trimmed || trimmed.length < 12 || /^[a-z_ -]+$/i.test(trimmed) || reasonContradictsCategory(trimmed, category)) {
+    return `AI signal accepted for '${category}' with confidence ${Math.round(confidence * 100)}%; reason was missing, generic, or contradicted the final category.`;
   }
   return trimmed.slice(0, 500);
 }
@@ -454,7 +459,7 @@ function guardedCategory(text: string, payee: string, amount: number): string | 
   if (/\b(uber eats|doordash|grubhub|restaurant|cafe|coffee|starbucks|chipotle|mcdonald|dunkin|taco|pizza)\b/.test(text)) return "dining";
   if (/\b(cbankus\.com|continental bank zolve)\b/.test(text)) return "uncategorized";
   if (/\b(fee|interest charge|purchase interest|late fee|returned payment|return payment|annual fee|credit protect)\b/.test(text)) return "fees";
-  if (/\b(uber one|netflix|spotify|google fi|claude\.ai subscription|openai|subscription|monthly|membership)\b/.test(text)) return "subscriptions";
+  if (/\b(uber one|netflix|spotify|google fi|claude\.ai subscription|openai|cloudflare|google cloud|perplexity|nous research|subscription|monthly|membership)\b/.test(text)) return "subscriptions";
   if (/\b(payment|credit card|autopay|ach pmt|e-payment|epayment|applecard gsbank|american express ach|discover e-payment|zolve pmt|adjustment-payments|adjustment payments)\b/.test(text)) return "transfers";
   if (/\b(geico|gas|shell|bp|exxon|parking|transit|uber|lyft)\b/.test(text) && !/\beats\b/.test(payee)) return "transport";
   return null;
@@ -508,13 +513,7 @@ function deterministicEnrichment(transaction: TransactionRow, model: string, err
 }
 
 function normalizeMerchant(text: string): string {
-  const normalized = text
-    .replace(/[^a-zA-Z0-9\s.'&/-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 80)
-    .toLowerCase();
-  return normalized || "unknown";
+  return canonicalMerchantKey(text);
 }
 
 function normalizeTransactionMerchant(transaction: TransactionRow, fallback: string): string {
@@ -583,7 +582,7 @@ function displayMerchant(transaction: TransactionRow): string {
 
 function isFeeLike(transaction: TransactionRow): boolean {
   const text = transactionText(transaction).toLowerCase();
-  return transaction.category === "fees" || /\b(fee|interest charge|purchase interest|late fee|returned payment)\b/.test(text);
+  return /\b(interest|purchase interest|late fee|returned payment|return payment|annual fee|service fee|atm fee|foreign transaction|overdraft)\b/.test(text);
 }
 
 function summarizeFeeTransactions(transactions: TransactionRow[]): Array<Record<string, unknown>> {
@@ -630,7 +629,7 @@ function unusualCandidates(transactions: TransactionRow[], subscriptionKeys: Set
   const merchantGroups = groupAmounts(spend, (transaction) => normalizeKey(displayMerchant(transaction)));
   const categoryGroups = groupAmounts(spend, (transaction) => String(transaction.category ?? "uncategorized"));
 
-  return spend
+  const magnitudeCandidates = spend
     .map((transaction) => {
       const amount = Math.abs(transaction.amount);
       const merchantStats = stats(merchantGroups.get(normalizeKey(displayMerchant(transaction))) ?? []);
@@ -659,6 +658,52 @@ function unusualCandidates(transactions: TransactionRow[], subscriptionKeys: Set
     })
     .filter((transaction) => Number(transaction.z_score) >= 1.5 && Number(transaction.amount_abs) >= 75)
     .sort((left, right) => Number(right.z_score) - Number(left.z_score) || Number(right.amount_abs) - Number(left.amount_abs));
+
+  const candidatesById = new Map<string, Record<string, unknown>>();
+  for (const candidate of [...magnitudeCandidates, ...temporalClusterCandidates(transactions, subscriptionKeys)]) {
+    const existing = candidatesById.get(String(candidate.id));
+    if (!existing || Number(candidate.z_score ?? 0) > Number(existing.z_score ?? 0)) {
+      candidatesById.set(String(candidate.id), candidate);
+    }
+  }
+  return [...candidatesById.values()]
+    .sort((left, right) => Number(right.z_score) - Number(left.z_score) || Number(right.amount_abs) - Number(left.amount_abs));
+}
+
+function temporalClusterCandidates(transactions: TransactionRow[], subscriptionKeys: Set<string>): Array<Record<string, unknown>> {
+  const rows = transactions
+    .filter((transaction) => transaction.category !== "transfers")
+    .filter((transaction) => !subscriptionKeys.has(normalizeKey(displayMerchant(transaction))))
+    .map((transaction) => ({
+      transaction,
+      day: Math.floor((transaction.posted_at ?? transaction.transacted_at ?? 0) / (24 * 60 * 60)),
+      key: `${transaction.category ?? "uncategorized"}:${normalizeKey(displayMerchant(transaction))}`
+    }))
+    .filter((row) => row.day > 0);
+  const output: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    const cluster = rows.filter((candidate) =>
+      candidate.key === row.key &&
+      Math.abs(candidate.day - row.day) <= 7
+    );
+    const total = cluster.reduce((sum, item) => sum + Math.abs(item.transaction.amount), 0);
+    const category = String(row.transaction.category ?? "uncategorized");
+    const clusterWorthy = cluster.length >= 2 && (
+      category === "fees" ||
+      total >= 100 ||
+      /\b(returned payment|late fee|interest)\b/i.test(transactionText(row.transaction))
+    );
+    if (!clusterWorthy) continue;
+    output.push({
+      ...row.transaction,
+      merchant: displayMerchant(row.transaction),
+      amount_abs: roundMoney(Math.abs(row.transaction.amount)),
+      baseline_average: roundMoney(total / cluster.length),
+      z_score: category === "fees" ? 2.2 : 1.7,
+      deterministic_reason: `${cluster.length} ${category} transactions clustered within 7 days.`
+    });
+  }
+  return output;
 }
 
 function groupAmounts(rows: TransactionRow[], keyFn: (transaction: TransactionRow) => string): Map<string, number[]> {
@@ -680,7 +725,63 @@ function stats(values: number[]): { count: number; average: number; stddev: numb
 }
 
 function normalizeKey(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return canonicalMerchantKey(value);
+}
+
+function reasonContradictsCategory(reason: string, category: string): boolean {
+  const categories = [
+    "income",
+    "housing",
+    "groceries",
+    "dining",
+    "dining_offset",
+    "transport",
+    "subscriptions",
+    "health",
+    "utilities",
+    "transfers",
+    "shopping",
+    "taxes",
+    "fees",
+    "entertainment",
+    "uncategorized"
+  ];
+  const lower = reason.toLowerCase();
+  return categories.some((candidate) =>
+    candidate !== category &&
+    new RegExp(`\\b${candidate.replace("_", "[ _-]")}\\b`).test(lower) &&
+    /\b(categorized|category|classified|classifies)\b/.test(lower)
+  );
+}
+
+function comparisonWindowFor(
+  periodStart: string,
+  periodEnd: string,
+  summary: Record<string, unknown>,
+  priorStart: string,
+  priorEnd: string,
+  priorSummary: Record<string, unknown>
+): Record<string, unknown> {
+  const currentSpending = Number(summary.spending ?? 0);
+  const priorSpending = Number(priorSummary.spending ?? 0);
+  return {
+    label: `current period ${periodStart} to ${periodEnd} vs prior period ${priorStart} to ${priorEnd}`,
+    current_period: { start_date: periodStart, end_date: periodEnd, spending: currentSpending },
+    prior_period: { start_date: priorStart, end_date: priorEnd, spending: priorSpending },
+    delta: roundMoney(currentSpending - priorSpending),
+    delta_pct: priorSpending > 0 ? Math.round(((currentSpending - priorSpending) / priorSpending) * 1000) / 10 : null
+  };
+}
+
+function anchorSummaryText(text: string, comparisonWindow: Record<string, unknown>): string {
+  const current = comparisonWindow.current_period as Record<string, unknown> | undefined;
+  const prior = comparisonWindow.prior_period as Record<string, unknown> | undefined;
+  const currentSpending = Number(current?.spending ?? 0);
+  const priorSpending = Number(prior?.spending ?? 0);
+  const deltaPct = comparisonWindow.delta_pct;
+  const anchor = `Comparison: ${current?.start_date} to ${current?.end_date} spending was $${currentSpending.toFixed(2)} vs $${priorSpending.toFixed(2)} for ${prior?.start_date} to ${prior?.end_date}${typeof deltaPct === "number" ? ` (${deltaPct >= 0 ? "+" : ""}${deltaPct}%)` : ""}.`;
+  if (text.includes(String(current?.start_date)) && text.includes(String(prior?.start_date))) return text;
+  return `${anchor} ${text}`.slice(0, 1200);
 }
 
 function roundMoney(value: number): number {

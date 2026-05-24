@@ -41,6 +41,8 @@ or quota problems, and other operational warnings.
 - `parse_fallback`: rows affected by model JSON parse problems
 - `quota_fallback`: rows affected by daily AI budget limits
 - `low_confidence_enriched`: successful but weak AI classifications
+- `low_confidence_threshold`: fixed threshold for the low-confidence count
+- `confidence_distribution`: confidence histogram for drift detection
 
 Do not treat `enriched_transactions == transactions` as proof that AI worked.
 It only proves every transaction has an enrichment row.
@@ -94,11 +96,20 @@ the explanation came from AI or deterministic fallback. It should exclude
 routine transfers and known recurring subscriptions.
 
 `generate_weekly_money_briefing` is expected to use current-period totals,
-prior-period totals, trailing-30-day fee totals, top subscriptions, unusual
-transactions, and human-safe `health.issues[]` messages. Agent-only
-`actionable_hint` values remain in status tools and should not appear in human
-briefing prose. Briefings should name specific merchants, amounts, and actions
-instead of generic category advice.
+prior-period totals, an explicit `comparison_window`, trailing-30-day fee
+totals, top subscriptions, unusual transactions, and human-safe
+`health.issues[]` messages. Agent-only `actionable_hint` values remain in status
+tools and should not appear in human briefing prose. Briefings should name
+specific merchants, amounts, date windows, and actions instead of generic
+category advice.
+
+`detect_recurring_obligations` broadens the subscription view into
+subscriptions, recurring fees, and other obligation-like spend such as BNPL or
+installments.
+
+`merchant_summary` is the preferred tool for merchant-specific questions. It
+returns spend, trend, account distribution, category distribution, weekday
+pattern, outliers, and recent rows.
 
 ## Read-Only Tools
 
@@ -117,6 +128,8 @@ instead of generic category advice.
 - `semantic_transaction_search`
 - `summarize_cashflow`
 - `detect_subscriptions`
+- `detect_recurring_obligations`
+- `merchant_summary`
 - `find_unusual_transactions`
 - `generate_weekly_money_briefing`
 
