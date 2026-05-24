@@ -27,7 +27,7 @@ export type OAuthMcpProps = ToolAuth & {
 
 class FinanceMcpApiHandler extends WorkerEntrypoint<Env, OAuthMcpProps> {
   async fetch(request: Request): Promise<Response> {
-    const startedAt = Date.now();
+    const startedAt = performance.now();
     const operation = safeMcpOperation(request);
     const props = this.ctx.props;
     const auth: ToolAuth = {
@@ -37,16 +37,68 @@ class FinanceMcpApiHandler extends WorkerEntrypoint<Env, OAuthMcpProps> {
     };
     const server = createFinanceMcpServer(this.env, auth);
     const response = await createMcpHandler(server, { route: "/mcp" })(request, this.env, this.ctx);
-    this.ctx.waitUntil(
-      saveMcpEvent(this.env, {
-        operation: await operation,
-        auth,
-        status: response.status,
-        durationMs: Date.now() - startedAt
-      })
-    );
+    return instrumentMcpResponse(response, {
+      env: this.env,
+      ctx: this.ctx,
+      operation: await operation,
+      auth,
+      startedAt
+    });
+  }
+}
+
+function elapsedMs(startedAt: number): number {
+  return Math.max(1, Math.round(performance.now() - startedAt));
+}
+
+function instrumentMcpResponse(response: Response, data: {
+  env: Env;
+  ctx: ExecutionContext;
+  operation: string;
+  auth: ToolAuth;
+  startedAt: number;
+}): Response {
+  if (!response.body) {
+    data.ctx.waitUntil(saveMcpEvent(data.env, {
+      operation: data.operation,
+      auth: data.auth,
+      status: response.status,
+      durationMs: elapsedMs(data.startedAt)
+    }));
     return response;
   }
+
+  const reader = response.body.getReader();
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        data.ctx.waitUntil(saveMcpEvent(data.env, {
+          operation: data.operation,
+          auth: data.auth,
+          status: response.status,
+          durationMs: elapsedMs(data.startedAt)
+        }));
+        controller.close();
+        return;
+      }
+      controller.enqueue(chunk.value);
+    },
+    async cancel(reason) {
+      await reader.cancel(reason);
+      data.ctx.waitUntil(saveMcpEvent(data.env, {
+        operation: data.operation,
+        auth: data.auth,
+        status: response.status,
+        durationMs: elapsedMs(data.startedAt)
+      }));
+    }
+  });
+  return new Response(stream, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers
+  });
 }
 
 const defaultHandler: ExportedHandler<Env> = {

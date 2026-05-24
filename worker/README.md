@@ -160,6 +160,20 @@ configuration is not considered runtime-verified until
 `scheduled_sync.verification_status` becomes `verified` after a completed
 scheduled sync.
 
+`worker_operational_status` is the main operational trust gate. It includes
+`health.issues[]` plus an `ai_enrichment` block that separates successful AI
+rows from deterministic fallback rows:
+
+- `ai_enriched`
+- `fallback_enriched`
+- `parse_fallback`
+- `quota_fallback`
+- `low_confidence_enriched`
+
+Do not rely on `enriched_transactions` alone. It only means an enrichment row
+exists. A healthy cache should have low or zero fallback, parse, and quota
+counts.
+
 Example:
 
 ```bash
@@ -195,6 +209,15 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 Weekly briefing generation requests structured JSON from Workers AI and retries
 once when the model returns invalid JSON. If both attempts fail, the Worker
 saves and returns a deterministic aggregate fallback instead of failing sync.
+Briefings receive current-period totals, prior-period totals, trailing-30-day
+fee totals, top subscriptions, unusual transactions, and `health.issues[]` so
+they can call out named merchants, amounts, data coverage issues, and concrete
+actions.
+
+Transaction categorization uses structured Workers AI output plus deterministic
+guardrails for obvious card payments, returned payment fees, interest charges,
+known subscriptions, dining delivery, transport, and irregular merchants that
+should remain reviewable.
 
 ## Secure Operational Audit
 
@@ -207,6 +230,10 @@ flag, status, duration, and limited scheduled-sync counts or error codes. It
 does not store credentials, request bodies, tool arguments, or finance response
 payloads. Read it with admin MCP tool `worker_audit_events` or
 `GET /admin/debug/events`.
+
+For streamed MCP responses, audit `duration_ms` is recorded when the response
+body closes. Slow AI tools should show larger durations than cheap metadata
+calls.
 
 For OAuth token incident response, use the admin-only OAuth grant endpoints to
 list grants for the provider user ID and revoke each affected grant. Revocation

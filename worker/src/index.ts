@@ -6,9 +6,24 @@ import type { Env } from "./types.js";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const startedAt = Date.now();
+    const startedAt = performance.now();
     const url = new URL(request.url);
     try {
+      const compatibilityResponse = oauthCompatibilityResponse(request, env);
+      if (compatibilityResponse) {
+        if (shouldAuditHttp(url.pathname, compatibilityResponse.status)) {
+          ctx.waitUntil(
+            saveHttpEvent(env, {
+              path: url.pathname,
+              method: request.method,
+              status: compatibilityResponse.status,
+              durationMs: elapsedMs(startedAt)
+            })
+          );
+        }
+        return compatibilityResponse;
+      }
+
       const registrationError = await validateClientRegistration(request);
       const response = registrationError ?? await maybeNormalizeRegistrationResponse(
         request,
@@ -20,7 +35,7 @@ export default {
             path: url.pathname,
             method: request.method,
             status: response.status,
-            durationMs: Date.now() - startedAt
+            durationMs: elapsedMs(startedAt)
           })
         );
       }
@@ -29,7 +44,7 @@ export default {
       ctx.waitUntil(saveWorkerErrorEvent(env, {
         path: url.pathname,
         method: request.method,
-        durationMs: Date.now() - startedAt,
+        durationMs: elapsedMs(startedAt),
         error
       }));
       return new Response(JSON.stringify({ error: "internal_error" }), {
@@ -47,19 +62,23 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 async function runScheduledSync(env: Env): Promise<void> {
-  const startedAt = Date.now();
+  const startedAt = performance.now();
   try {
     const result = await syncSimpleFin(env, { trigger: "scheduled", pending: true });
-    await saveScheduledSyncEvent(env, { status: "ok", durationMs: Date.now() - startedAt, result });
+    await saveScheduledSyncEvent(env, { status: "ok", durationMs: elapsedMs(startedAt), result });
   } catch (error) {
-    await saveScheduledSyncEvent(env, { status: "error", durationMs: Date.now() - startedAt, error });
+    await saveScheduledSyncEvent(env, { status: "error", durationMs: elapsedMs(startedAt), error });
     throw error;
   }
 }
 
+function elapsedMs(startedAt: number): number {
+  return Math.max(1, Math.round(performance.now() - startedAt));
+}
+
 function shouldAuditHttp(path: string, status: number): boolean {
   if (path === "/mcp") return status >= 400;
-  return path.startsWith("/register") || new Set([
+  return path.startsWith("/register") || path.startsWith("/.well-known/") || new Set([
     "/health",
     "/ready",
     "/authorize",
@@ -75,6 +94,68 @@ function shouldAuditHttp(path: string, status: number): boolean {
   ]).has(path);
 }
 
+function oauthCompatibilityResponse(request: Request, env: Env): Response | undefined {
+  const url = new URL(request.url);
+  const corsPaths = new Set([
+    "/register",
+    "/authorize",
+    "/callback",
+    "/token",
+    "/mcp",
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/oauth-authorization-server/mcp",
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/mcp"
+  ]);
+
+  if (request.method === "OPTIONS" && corsPaths.has(url.pathname)) {
+    return new Response(null, {
+      status: 204,
+      headers: oauthCorsHeaders()
+    });
+  }
+
+  if (request.method !== "GET") return undefined;
+
+  const origin = publicOrigin(env, request);
+  const mcpUrl = env.PUBLIC_MCP_URL ?? `${origin}/mcp`;
+
+  if (
+    url.pathname === "/.well-known/oauth-authorization-server" ||
+    url.pathname === "/.well-known/oauth-authorization-server/mcp"
+  ) {
+    return oauthJson({
+      issuer: origin,
+      authorization_endpoint: `${origin}/authorize`,
+      token_endpoint: `${origin}/token`,
+      registration_endpoint: `${origin}/register`,
+      scopes_supported: ["finance:read", "finance:admin"],
+      response_types_supported: ["code"],
+      response_modes_supported: ["query"],
+      grant_types_supported: ["authorization_code", "refresh_token"],
+      token_endpoint_auth_methods_supported: ["client_secret_basic", "client_secret_post", "none"],
+      revocation_endpoint: `${origin}/token`,
+      code_challenge_methods_supported: ["S256"],
+      client_id_metadata_document_supported: false
+    });
+  }
+
+  if (
+    url.pathname === "/.well-known/oauth-protected-resource" ||
+    url.pathname === "/.well-known/oauth-protected-resource/mcp"
+  ) {
+    return oauthJson({
+      resource: mcpUrl,
+      authorization_servers: [origin],
+      scopes_supported: ["finance:read", "finance:admin"],
+      bearer_methods_supported: ["header"],
+      resource_name: "SimpleFIN Finance MCP"
+    });
+  }
+
+  return undefined;
+}
+
 async function maybeNormalizeRegistrationResponse(request: Request, response: Response): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname !== "/register" || request.method !== "POST" || response.status !== 201) {
@@ -86,6 +167,7 @@ async function maybeNormalizeRegistrationResponse(request: Request, response: Re
   return new Response(JSON.stringify(body), {
     status: response.status,
     headers: {
+      ...oauthCorsHeaders(),
       "content-type": "application/json"
     }
   });
@@ -169,4 +251,30 @@ function isAllowedRedirectUri(value: string): boolean {
   }
   const scheme = normalized.slice(0, colonIndex + 1).toLowerCase();
   return !new Set(["javascript:", "data:", "vbscript:", "file:", "mailto:", "blob:"]).has(scheme);
+}
+
+function oauthJson(body: Record<string, unknown>, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      ...oauthCorsHeaders(),
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store"
+    }
+  });
+}
+
+function oauthCorsHeaders(): Record<string, string> {
+  return {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET,POST,OPTIONS",
+    "access-control-allow-headers": "authorization,content-type,mcp-protocol-version",
+    "access-control-max-age": "86400",
+    "vary": "origin"
+  };
+}
+
+function publicOrigin(env: Env, request: Request): string {
+  if (env.PUBLIC_ORIGIN) return env.PUBLIC_ORIGIN.replace(/\/+$/, "");
+  return new URL(request.url).origin;
 }

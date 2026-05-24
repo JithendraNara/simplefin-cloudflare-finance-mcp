@@ -32,5 +32,12 @@ Agent usage rules:
 - Check `scheduled_sync.verification_status`; configured cron is not proven
   until a scheduled run has completed.
 - Use `simplefin_data_coverage` as the account-level trust gate.
+- Use `worker_operational_status.health.issues[]` as the global trust gate.
+- Check `ai_enrichment.ai_enriched`, `fallback_enriched`, `parse_fallback`,
+  and `quota_fallback` before trusting AI-derived categories, subscriptions,
+  anomaly explanations, or briefings.
 - Use `simplefin_raw_account` only for one `accountId` at a time with a narrow `limit`.
 - Prefer summaries and search tools over loading all transactions into context.
+- When modifying this public starter, keep examples generic. Real deployment
+  domains, account names, transaction examples, D1 IDs, KV IDs, OAuth secrets,
+  bearer tokens, and operational history belong only in a private fork.

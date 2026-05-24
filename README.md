@@ -15,8 +15,11 @@ This repository is a public starter. It contains no tokens, no financial data, n
 - Automatic account-specific 90-day backfill for new/problem accounts
 - D1 cache with normalized accounts, transactions, sync runs, coverage, and audit events
 - Workers AI transaction categorization and weekly briefings
+- Honest AI health counters: real AI enrichments, deterministic fallbacks, parse failures, quota fallbacks, and low-confidence rows
+- Deterministic category guardrails for obvious payments, fees, subscriptions, dining, and one-off purchases
 - Vectorize semantic transaction search
 - Raw SimpleFIN diagnostics scoped to one account at a time
+- Sanitized D1 audit timing for MCP/HTTP operations without storing prompts, tool args, finance payloads, or tokens
 
 ## Architecture
 
@@ -207,6 +210,25 @@ For finance analysis, call:
 
 If coverage is unhealthy, call `simplefin_account_gaps` before making conclusions. Use `simplefin_raw_account` only with a specific `accountId` and a narrow `limit`.
 
+Also check `worker_operational_status.health.issues[]` and
+`worker_operational_status.ai_enrichment` before trusting AI-derived categories,
+subscriptions, anomalies, or briefings. `enriched_transactions` only means a row
+exists in `transaction_enrichment`; use `ai_enriched`, `fallback_enriched`,
+`parse_fallback`, and `quota_fallback` to know whether Workers AI actually
+succeeded.
+
+The Worker intentionally uses Workers AI as an enrichment layer, not as the
+source of truth. Structured JSON model output is repaired/validated, then
+high-confidence deterministic guardrails correct obvious cases such as card
+payments, returned payment fees, interest charges, Apple Store purchases,
+DoorDash/Uber Eats/Grubhub dining, known subscriptions, and irregular merchants
+that should remain reviewable.
+
+Weekly briefings receive compact current-period totals, prior-period totals,
+trailing-30-day fee totals, subscriptions, unusual transactions, and
+`health.issues[]`. This keeps briefings focused on named merchants, amounts,
+coverage issues, and concrete next actions.
+
 ## Smoke Tests
 
 ```bash
@@ -253,6 +275,12 @@ git status --short
 ```
 
 Seeing placeholder names in docs/config is fine. Seeing real token values is not.
+
+If you keep a private fork for your own deployment, put real domains, Cloudflare
+resource IDs, operational history, and agent handoff details there. Keep this
+public starter free of personal endpoint names, real account IDs, D1 exports,
+sync outputs, bearer tokens, OAuth secrets, or financial examples from a live
+account.
 
 ## License
 

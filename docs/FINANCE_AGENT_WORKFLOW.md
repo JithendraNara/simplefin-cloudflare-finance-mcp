@@ -28,6 +28,23 @@ configured cron from a cron that has actually completed in production. Treat
 `awaiting_first_scheduled_run` as unverified scheduling, even when data is
 fresh from a manual sync.
 
+`worker_operational_status.health.issues[]` is the global trust gate. Treat
+`critical` issues as blockers for confident analysis. Warnings should be named
+in the answer when they affect the conclusion. Issue sources include data
+freshness, account coverage, SimpleFIN errlist mappings, AI enrichment fallback
+or quota problems, and other operational warnings.
+
+`worker_operational_status.ai_enrichment` separates:
+
+- `ai_enriched`: rows enriched by successful Workers AI output
+- `fallback_enriched`: rows filled by deterministic fallback after AI failure
+- `parse_fallback`: rows affected by model JSON parse problems
+- `quota_fallback`: rows affected by daily AI budget limits
+- `low_confidence_enriched`: successful but weak AI classifications
+
+Do not treat `enriched_transactions == transactions` as proof that AI worked.
+It only proves every transaction has an enrichment row.
+
 ## Coverage First
 
 `simplefin_data_coverage` is the per-account trust gate. It reports:
@@ -60,6 +77,26 @@ Prefer compact tools first:
 - `semantic_transaction_search`
 
 Avoid loading raw transaction history unless the user asks a narrow question. If raw SimpleFIN fields are needed, use `simplefin_raw_account` with one `accountId` and a limit.
+
+## AI And Insight Provenance
+
+Workers AI is an enrichment layer. SQL totals, account coverage, sync status,
+and raw SimpleFIN diagnostics remain deterministic.
+
+Categorization uses structured JSON output, JSON repair/validation, and
+deterministic guardrails. Guardrails correct obvious card payments, fees,
+interest charges, known subscriptions, dining delivery, transport, and
+review-needed irregular merchants. The `ai_reason` field should explain whether
+the final category came directly from AI or from a guardrail repair.
+
+`find_unusual_transactions` returns `explanation_status` so agents know whether
+the explanation came from AI or deterministic fallback. It should exclude
+routine transfers and known recurring subscriptions.
+
+`generate_weekly_money_briefing` is expected to use current-period totals,
+prior-period totals, trailing-30-day fee totals, top subscriptions, unusual
+transactions, and `health.issues[]`. Briefings should name specific merchants,
+amounts, and actions instead of generic category advice.
 
 ## Read-Only Tools
 
@@ -102,6 +139,10 @@ audit trail retained for 30 days. It records only known operational routes, MCP
 tool names, auth mode, admin flag, response status, duration, and limited
 scheduled-sync counts or error codes. It never stores request bodies, tool
 arguments, finance responses, or credentials.
+
+For streamed MCP responses, audit `duration_ms` is measured when the response
+body closes, not when the `Response` object is first created. Slow AI tools
+should therefore show materially larger durations than cheap metadata calls.
 
 For incident response, an admin bearer session can use
 `GET /admin/oauth/grants?user_id=<provider-user-id>` and

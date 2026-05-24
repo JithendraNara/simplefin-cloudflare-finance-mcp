@@ -27,7 +27,9 @@ export class FinanceRepository {
 	      last_sync: lastSync ?? null,
 	      data_freshness: await this.dataFreshness(),
 	      account_coverage: await this.accountCoverageSummary(),
-	      scheduled_sync: await this.scheduledSyncStatus()
+	      scheduled_sync: await this.scheduledSyncStatus(),
+	      ai_enrichment: await this.aiEnrichmentHealth(),
+	      health: { issues: await this.healthIssues() }
 	    };
 	  }
 
@@ -150,6 +152,7 @@ export class FinanceRepository {
     const dataFreshness = await this.dataFreshness();
 	    const accountCoverage = await this.accountCoverageSummary();
 	    const scheduledSync = await this.scheduledSyncStatus();
+	    const aiEnrichment = await this.aiEnrichmentHealth();
 	    const accountCoverageHealthy = accountCoverage.healthy !== false;
 	    const readiness = {
 	      ready: Boolean(lastSync?.status === "ok" && transactions > 0 && dataFreshness.fresh === true && accountCoverageHealthy),
@@ -168,6 +171,8 @@ export class FinanceRepository {
 	      data_freshness: dataFreshness,
 	      scheduled_sync: scheduledSync,
 	      account_coverage: accountCoverage,
+	      ai_enrichment: aiEnrichment,
+	      health: { issues: await this.healthIssues(dataFreshness, accountCoverage, aiEnrichment) },
 	      coverage,
       recent_syncs: recentSyncs,
       ai_usage_today: aiUsageToday,
@@ -338,7 +343,18 @@ export class FinanceRepository {
 
 	  async listAccounts(): Promise<Record<string, unknown>> {
 	    const { results } = await this.env.DB.prepare(
-	      `SELECT a.*,
+	      `SELECT
+	        a.id,
+	        a.name,
+	        a.conn_id,
+	        a.conn_name,
+	        a.org_name,
+	        a.org_url,
+	        a.currency,
+	        a.balance,
+	        a.available_balance,
+	        a.balance_date,
+	        a.updated_at,
 	        COUNT(t.id) AS transaction_count,
 	        c.coverage_status,
 	        c.earliest_transaction_at,
@@ -354,7 +370,14 @@ export class FinanceRepository {
 	       ORDER BY COALESCE(a.org_name, ''), COALESCE(a.name, a.id)`
 	    ).all();
 
-	    return { accounts: results };
+	    return { accounts: results.map((row) => ({
+	      ...row,
+	      warnings: safeJsonArray(row.warnings_json),
+	      warnings_json: undefined,
+	      earliest_transaction_at_iso: epochToIso(row.earliest_transaction_at),
+	      latest_transaction_at_iso: epochToIso(row.latest_transaction_at),
+	      balance_date_iso: epochToIso(row.balance_date)
+	    })) };
 	  }
 
 	  async financeOverview(options: { days?: number } = {}): Promise<Record<string, unknown>> {
@@ -408,14 +431,14 @@ export class FinanceRepository {
 
     const { results: topMerchants } = await this.env.DB.prepare(
       `SELECT
-        COALESCE(e.merchant_normalized, t.payee, t.description, 'unknown') AS merchant,
+        ${merchantDisplaySql()} AS merchant,
         COALESCE(e.category, 'uncategorized') AS category,
         COUNT(*) AS transaction_count,
         ROUND(COALESCE(SUM(CASE WHEN t.amount < 0 THEN -t.amount ELSE 0 END), 0), 2) AS spending
        FROM transactions t
        LEFT JOIN transaction_enrichment e ON e.transaction_id = t.id
        WHERE t.amount < 0 AND COALESCE(t.posted_at, t.transacted_at, 0) >= ?
-       GROUP BY merchant, category
+       GROUP BY LOWER(merchant), category
        HAVING spending > 0
        ORDER BY spending DESC
        LIMIT 10`
@@ -425,7 +448,7 @@ export class FinanceRepository {
 
     const { results: feeSignals } = await this.env.DB.prepare(
       `SELECT
-        COALESCE(e.merchant_normalized, t.payee, t.description, 'unknown') AS fee,
+        ${merchantDisplaySql()} AS fee,
         COUNT(*) AS count,
         ROUND(COALESCE(SUM(-t.amount), 0), 2) AS total
        FROM transactions t
@@ -460,9 +483,13 @@ export class FinanceRepository {
 	      balances,
 	      cashflow,
 	      categories,
-	      top_merchants: topMerchants,
-	      fee_signals: feeSignals,
-	      data_quality: integrity,
+	      top_merchants: mergeMerchantRows(topMerchants, "merchant", "spending").slice(0, 10),
+	      fee_signals: mergeMerchantRows(feeSignals, "fee", "total").slice(0, 10),
+	      data_quality: {
+	        ...integrity,
+	        ai_enrichment: await this.aiEnrichmentHealth(),
+	        health_issues: await this.healthIssues()
+	      },
 	      last_sync: lastSync,
 	      data_freshness: await this.dataFreshness(),
 	      account_coverage: await this.accountCoverageSummary()
@@ -955,36 +982,51 @@ export class FinanceRepository {
       { income: 0, spending: 0, net: 0, transaction_count: 0 }
     );
 
-    return { ...totals, categories: results };
+    return {
+      income: roundMoney(totals.income),
+      spending: roundMoney(totals.spending),
+      net: roundMoney(totals.net),
+      transaction_count: totals.transaction_count,
+      categories: results.map((row) => ({
+        ...row,
+        income: roundMoney(Number(row.income ?? 0)),
+        spending: roundMoney(Number(row.spending ?? 0)),
+        net: roundMoney(Number(row.net ?? 0))
+      }))
+    };
   }
 
   async detectSubscriptions(): Promise<Record<string, unknown>> {
     const { results } = await this.env.DB.prepare(
       `SELECT
-        LOWER(TRIM(COALESCE(e.merchant_normalized, t.payee, t.description, t.memo, 'unknown'))) AS merchant_key,
-        COALESCE(e.merchant_normalized, t.payee, t.description, t.memo, 'unknown') AS merchant,
-        ROUND(AVG(ABS(t.amount)), 2) AS average_amount,
-        COUNT(*) AS occurrences,
-        MIN(COALESCE(t.posted_at, t.transacted_at)) AS first_seen,
-        MAX(COALESCE(t.posted_at, t.transacted_at)) AS last_seen,
-        MAX(COALESCE(e.is_subscription_candidate, 0)) AS ai_subscription_candidate
+        t.id,
+        t.amount,
+        t.description,
+        t.payee,
+        t.memo,
+        COALESCE(t.posted_at, t.transacted_at) AS occurred_at,
+        COALESCE(e.category, 'uncategorized') AS category,
+        COALESCE(e.is_subscription_candidate, 0) AS ai_subscription_candidate,
+        ${merchantDisplaySql()} AS merchant
        FROM transactions t
        LEFT JOIN transaction_enrichment e ON e.transaction_id = t.id
        WHERE t.amount < 0
-       GROUP BY merchant_key
-       HAVING COUNT(*) >= 2
-       ORDER BY occurrences DESC, average_amount DESC
-       LIMIT 50`
+       ORDER BY COALESCE(t.posted_at, t.transacted_at, 0) DESC
+       LIMIT 2000`
     ).all();
 
-    return { subscriptions: results };
+    return { subscriptions: detectSubscriptionCandidates(results) };
   }
 
   async unenrichedTransactions(limit = 20): Promise<TransactionRow[]> {
     const { results } = await this.env.DB.prepare(
       `${transactionSelectSql()}
        WHERE e.transaction_id IS NULL
-       ORDER BY COALESCE(t.posted_at, t.transacted_at, 0) DESC
+          OR e.ai_reason LIKE 'Deterministic fallback%'
+       ORDER BY
+         CASE WHEN e.transaction_id IS NULL THEN 0 ELSE 1 END,
+         COALESCE(e.enriched_at, '1970-01-01T00:00:00.000Z') ASC,
+         COALESCE(t.posted_at, t.transacted_at, 0) DESC
        LIMIT ?`
     )
       .bind(limit)
@@ -1059,6 +1101,122 @@ export class FinanceRepository {
       .bind(start.toISOString())
       .first<{ count: number }>();
     return Number(row?.count ?? 0);
+  }
+
+  async aiEnrichmentHealth(): Promise<Record<string, unknown>> {
+    const row = await this.env.DB.prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM transactions) AS transactions,
+        COUNT(e.transaction_id) AS enriched_transactions,
+        SUM(CASE WHEN e.ai_reason LIKE 'Deterministic fallback%' THEN 1 ELSE 0 END) AS fallback_enriched,
+        SUM(CASE WHEN e.ai_reason NOT LIKE 'Deterministic fallback%' THEN 1 ELSE 0 END) AS ai_enriched,
+        SUM(CASE WHEN e.ai_reason LIKE '%daily_ai_item_limit_reached%' THEN 1 ELSE 0 END) AS quota_fallback,
+        SUM(CASE WHEN e.ai_reason LIKE '%parseable JSON%' OR e.ai_reason LIKE '%JSON%' OR e.ai_reason LIKE '%SyntaxError%' THEN 1 ELSE 0 END) AS parse_fallback,
+        SUM(CASE WHEN e.confidence < 0.5 THEN 1 ELSE 0 END) AS low_confidence_enriched
+       FROM transaction_enrichment e`
+    ).first<Record<string, unknown>>();
+    const transactions = Number(row?.transactions ?? 0);
+    const fallback = Number(row?.fallback_enriched ?? 0);
+    return {
+      transactions,
+      enriched_transactions: Number(row?.enriched_transactions ?? 0),
+      ai_enriched: Number(row?.ai_enriched ?? 0),
+      fallback_enriched: fallback,
+      fallback_ratio: transactions > 0 ? Math.round((fallback / transactions) * 1000) / 1000 : 0,
+      quota_fallback: Number(row?.quota_fallback ?? 0),
+      parse_fallback: Number(row?.parse_fallback ?? 0),
+      low_confidence_enriched: Number(row?.low_confidence_enriched ?? 0),
+      healthy: transactions === 0 || fallback / transactions < 0.25
+    };
+  }
+
+  async healthIssues(
+    dataFreshness?: Record<string, unknown>,
+    accountCoverage?: Record<string, unknown>,
+    aiEnrichment?: Record<string, unknown>
+  ): Promise<Array<Record<string, unknown>>> {
+    const freshness = dataFreshness ?? await this.dataFreshness();
+    const coverage = accountCoverage ?? await this.accountCoverageSummary();
+    const ai = aiEnrichment ?? await this.aiEnrichmentHealth();
+    const issues: Array<Record<string, unknown>> = [];
+
+    if (freshness.fresh !== true) {
+      issues.push({
+        severity: "critical",
+        source: "data_freshness",
+        message: "Finance cache is stale or last sync failed.",
+        actionable_hint: "Run sync_simplefin as an admin before analysis."
+      });
+    }
+    for (const warning of Array.isArray(freshness.warnings) ? freshness.warnings : []) {
+      issues.push({
+        severity: "warning",
+        source: "data_freshness",
+        message: String(warning),
+        actionable_hint: "Check connection_status and simplefin_sync_history."
+      });
+    }
+
+    if (coverage.healthy === false || Number(coverage.warning_accounts ?? 0) > 0 || Number(coverage.needs_backfill_accounts ?? 0) > 0) {
+      issues.push({
+        severity: Number(coverage.needs_backfill_accounts ?? 0) > 0 ? "critical" : "warning",
+        source: "account_coverage",
+        message: `${coverage.warning_accounts ?? 0} warning accounts, ${coverage.needs_backfill_accounts ?? 0} accounts need backfill.`,
+        actionable_hint: "Call simplefin_data_coverage and simplefin_account_gaps before per-account conclusions."
+      });
+    }
+
+    const fallback = Number(ai.fallback_enriched ?? 0);
+    const transactions = Number(ai.transactions ?? 0);
+    if (fallback > 0) {
+      issues.push({
+        severity: transactions > 0 && fallback / transactions > 0.5 ? "critical" : "warning",
+        source: "ai_enrichment",
+        message: `${fallback} transactions are deterministic fallback enrichments, not successful AI enrichments.`,
+        actionable_hint: "Run categorize_uncategorized_transactions or refresh_insights after fixing AI parsing."
+      });
+    }
+    if (Number(ai.quota_fallback ?? 0) > 0) {
+      issues.push({
+        severity: "warning",
+        source: "ai_enrichment",
+        message: `${ai.quota_fallback} transactions fell back because the daily AI item limit was reached.`,
+        actionable_hint: "Retry after the daily AI quota window resets or lower batch size."
+      });
+    }
+
+    const lastSync = await this.env.DB.prepare(
+      `SELECT errlist_json FROM sync_runs WHERE status = 'ok' ORDER BY synced_at DESC LIMIT 1`
+    ).first<{ errlist_json?: string }>();
+    const errlist = safeJsonArray(lastSync?.errlist_json);
+    if (errlist.length > 0) {
+      const affectedAccounts = await this.accountsWithCoverageWarning("missingdata_errlist");
+      const affectedLabel = affectedAccounts.length > 0
+        ? ` (${affectedAccounts.map((account) => account.org_name ?? account.name ?? account.id).join(", ")})`
+        : "";
+      issues.push({
+        severity: "warning",
+        source: "simplefin_errlist",
+        message: `Last successful SimpleFIN sync returned ${errlist.length} errlist item(s)${affectedLabel}.`,
+        actionable_hint: "Call simplefin_sync_history and simplefin_account_gaps for account-level mapping."
+      });
+    }
+
+    return issues;
+  }
+
+  async accountsWithCoverageWarning(warning: string): Promise<Array<Record<string, string>>> {
+    const { results } = await this.env.DB.prepare(
+      `SELECT a.id, a.name, a.org_name
+       FROM account_sync_coverage c
+       LEFT JOIN accounts a ON a.id = c.account_id
+       WHERE c.warnings_json LIKE ?
+       ORDER BY COALESCE(a.org_name, ''), COALESCE(a.name, a.id)
+       LIMIT 5`
+    )
+      .bind(`%"${warning}"%`)
+      .all<Record<string, string>>();
+    return results;
   }
 
   async saveBriefing(data: {
@@ -1185,6 +1343,55 @@ function transactionSelectSql(): string {
    LEFT JOIN transaction_enrichment e ON e.transaction_id = t.id`;
 }
 
+function merchantDisplaySql(): string {
+  return "COALESCE(NULLIF(TRIM(t.payee), ''), NULLIF(TRIM(e.merchant_normalized), ''), NULLIF(TRIM(t.description), ''), NULLIF(TRIM(t.memo), ''), 'unknown')";
+}
+
+function mergeMerchantRows(rows: Record<string, unknown>[], nameField: "merchant" | "fee", amountField: "spending" | "total"): Record<string, unknown>[] {
+  const groups = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    const display = canonicalMerchantDisplay(String(row[nameField] ?? "unknown"));
+    const key = normalizeMerchantKey(display);
+    const existing = groups.get(key);
+    if (!existing) {
+      groups.set(key, {
+        ...row,
+        [nameField]: display,
+        [amountField]: roundMoney(Number(row[amountField] ?? 0)),
+        transaction_count: Number(row.transaction_count ?? row.count ?? 0),
+        count: row.count === undefined ? undefined : Number(row.count ?? 0)
+      });
+      continue;
+    }
+    existing[amountField] = roundMoney(Number(existing[amountField] ?? 0) + Number(row[amountField] ?? 0));
+    if (existing.transaction_count !== undefined || row.transaction_count !== undefined) {
+      existing.transaction_count = Number(existing.transaction_count ?? 0) + Number(row.transaction_count ?? 0);
+    }
+    if (existing.count !== undefined || row.count !== undefined) {
+      existing.count = Number(existing.count ?? 0) + Number(row.count ?? 0);
+    }
+  }
+  return [...groups.values()]
+    .map((row) => Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined)))
+    .sort((left, right) => Number(right[amountField] ?? 0) - Number(left[amountField] ?? 0));
+}
+
+function canonicalMerchantDisplay(value: string): string {
+  const normalized = normalizeMerchantKey(value);
+  if (normalized === "interest" || normalized === "interest charge") return "Interest Charge";
+  if (normalized.includes("returned payment")) return "Returned Payment Fee";
+  if (normalized.includes("apple credit card")) return "Payment: Apple Card";
+  if (normalized.includes("american express credit card")) return "Payment: American Express";
+  if (normalized.includes("chase credit card")) return "Payment: Chase";
+  if (normalized === "doordash") return "DoorDash";
+  if (normalized === "openai") return "OpenAI";
+  if (normalized === "google fi wireless") return "Google Fi Wireless";
+  return value
+    .split(/\s+/)
+    .map((part) => part.length <= 3 && part === part.toUpperCase() ? part : part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 function dateToEpochNumber(value: string): number {
   return Math.floor(new Date(`${value}T00:00:00Z`).getTime() / 1000);
 }
@@ -1197,6 +1404,10 @@ function addOneDay(value: string): string {
 
 function roundHours(value: number): number {
   return Math.round(value * 10) / 10;
+}
+
+function roundMoney(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function nullableNumberValue(value: unknown): number | null {
@@ -1282,6 +1493,117 @@ function safeJson(value: unknown): unknown {
 function safeJsonArray(value: unknown): unknown[] {
   const parsed = safeJson(value);
   return Array.isArray(parsed) ? parsed : [];
+}
+
+function detectSubscriptionCandidates(rows: Record<string, unknown>[]): Array<Record<string, unknown>> {
+  const groups = new Map<string, Record<string, unknown>[]>();
+  for (const row of rows) {
+    const text = subscriptionText(row);
+    if (isSubscriptionBlocked(text, String(row.category ?? ""))) continue;
+    const key = normalizeMerchantKey(String(row.merchant ?? "unknown"));
+    const existing = groups.get(key) ?? [];
+    existing.push(row);
+    groups.set(key, existing);
+  }
+
+  return [...groups.entries()]
+    .map(([merchantKey, group]) => scoreSubscriptionGroup(merchantKey, group))
+    .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate))
+    .sort((left, right) => Number(right.score ?? 0) - Number(left.score ?? 0))
+    .slice(0, 20);
+}
+
+function scoreSubscriptionGroup(merchantKey: string, group: Record<string, unknown>[]): Record<string, unknown> | null {
+  const sorted = [...group].sort((left, right) => Number(left.occurred_at ?? 0) - Number(right.occurred_at ?? 0));
+  const amounts = sorted.map((row) => Math.abs(Number(row.amount ?? 0))).filter((value) => Number.isFinite(value) && value > 0);
+  if (amounts.length === 0) return null;
+
+  const merchant = String(sorted[sorted.length - 1]?.merchant ?? merchantKey);
+  const category = String(sorted[sorted.length - 1]?.category ?? "uncategorized");
+  const text = sorted.map(subscriptionText).join(" ");
+  const explicitSubscription = /\b(uber one|netflix|spotify|hulu|disney|google fi|apple\.com\/bill|subscription|monthly|membership)\b/i.test(text);
+  const occurrences = amounts.length;
+  if (occurrences < 2 && !explicitSubscription) return null;
+
+  const average = averageOf(amounts);
+  const amountStddev = stddevOf(amounts, average);
+  const coefficientOfVariation = average > 0 ? amountStddev / average : 1;
+  const dates = sorted.map((row) => Number(row.occurred_at ?? 0)).filter((value) => Number.isFinite(value) && value > 0);
+  const intervals = dates.slice(1).map((date, index) => Math.abs(date - dates[index]) / (24 * 60 * 60));
+  const intervalAverage = intervals.length > 0 ? averageOf(intervals) : null;
+  const intervalStddev = intervals.length > 1 && intervalAverage !== null ? stddevOf(intervals, intervalAverage) : null;
+
+  const amountStability = Math.max(0, 1 - Math.min(coefficientOfVariation, 1));
+  const intervalRegularity = intervalStddev === null
+    ? explicitSubscription ? 0.75 : 0.55
+    : Math.max(0, 1 - Math.min(intervalStddev / 10, 1));
+  const categoryPrior = subscriptionCategoryPrior(category, text);
+  const score = roundScore(amountStability * intervalRegularity * categoryPrior);
+  const stableEnough = coefficientOfVariation <= 0.15;
+  const regularEnough = intervalStddev === null || intervalStddev <= 7;
+
+  if (!explicitSubscription && (!stableEnough || !regularEnough || score < 0.35)) return null;
+  if (score < 0.25) return null;
+
+  return {
+    merchant_key: merchantKey,
+    merchant,
+    category,
+    average_amount: roundMoney(average),
+    amount_stddev: roundMoney(amountStddev),
+    coefficient_of_variation: roundScore(coefficientOfVariation),
+    interval_average_days: intervalAverage === null ? null : roundScore(intervalAverage),
+    interval_stddev_days: intervalStddev === null ? null : roundScore(intervalStddev),
+    occurrences,
+    first_seen: epochToIso(dates[0]),
+    last_seen: epochToIso(dates[dates.length - 1]),
+    score,
+    explicit_subscription_signal: explicitSubscription,
+    ai_subscription_candidate: sorted.some((row) => Number(row.ai_subscription_candidate ?? 0) > 0)
+  };
+}
+
+function subscriptionText(row: Record<string, unknown>): string {
+  return [
+    row.merchant,
+    row.description,
+    row.payee,
+    row.memo,
+    row.category
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function isSubscriptionBlocked(text: string, category: string): boolean {
+  if (["transfers", "fees", "dining_offset"].includes(category)) return true;
+  if (category === "dining" && /\bapple\b/i.test(text)) return true;
+  return /\b(interest|payment|ach pmt|e-payment|epayment|adjustment|late fee|returned payment|return payment|gas|fuel|doordash|grubhub|uber eats|restaurant|mcdonald|costco gas)\b/i.test(text);
+}
+
+function subscriptionCategoryPrior(category: string, text: string): number {
+  if (/\b(uber one|netflix|spotify|hulu|disney|google fi|apple\.com\/bill|membership|subscription)\b/i.test(text)) return 1;
+  if (category === "subscriptions") return 0.95;
+  if (category === "utilities") return 0.75;
+  if (category === "entertainment") return 0.7;
+  if (category === "health") return 0.55;
+  if (category === "shopping") return 0.35;
+  if (category === "dining" || category === "transport") return 0.2;
+  return 0.4;
+}
+
+function normalizeMerchantKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim() || "unknown";
+}
+
+function averageOf(values: number[]): number {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function stddevOf(values: number[], average: number): number {
+  return Math.sqrt(values.reduce((sum, value) => sum + (value - average) ** 2, 0) / values.length);
+}
+
+function roundScore(value: number): number {
+  return Math.round(value * 1000) / 1000;
 }
 
 function inclusiveDaySpan(startDate: string, endDate: string): number {
