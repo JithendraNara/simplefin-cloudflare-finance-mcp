@@ -1,0 +1,39 @@
+{
+  "accounts": {
+    "count": 3,
+    "total_balance": 4380.42,
+    "currency": "USD"
+  },
+  "cashflow": {
+    "period_days": 30,
+    "income": 3200,
+    "spending": 1842.67,
+    "net": 1357.33
+  },
+  "categories": [
+    { "category": "groceries", "spending": 420.18 },
+    { "category": "dining", "spending": 186.24 },
+    { "category": "subscriptions", "spending": 59.98 },
+    { "category": "fees", "spending": 12 }
+  ],
+  "top_merchants": [
+    { "merchant": "Demo Grocery", "amount": 245.18, "category": "groceries" },
+    { "merchant": "Demo Visa Payment", "amount": 220, "category": "transfers" },
+    { "merchant": "Demo Streaming", "amount": 19.99, "category": "subscriptions" }
+  ],
+  "ai_enrichment": {
+    "transactions": 128,
+    "enriched_transactions": 128,
+    "ai_enriched": 126,
+    "fallback_enriched": 2,
+    "fallback_ratio": 0.016,
+    "quota_fallback": 0,
+    "parse_fallback": 0,
+    "low_confidence_enriched": 9,
+    "healthy": true
+  },
+  "data_quality": {
+    "fresh": true,
+    "health_issues": []
+  }
+}

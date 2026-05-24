@@ -44,6 +44,9 @@ Agent usage rules:
   display layers can canonicalize names separately.
 - Use `simplefin_raw_account` only for one `accountId` at a time with a narrow `limit`.
 - Prefer summaries and search tools over loading all transactions into context.
+- Keep [README.md](README.md) focused on positioning, sample output, and
+  discovery. Put setup details in [docs/SETUP.md](docs/SETUP.md) and reusable
+  design notes in [docs/PATTERNS.md](docs/PATTERNS.md).
 - When modifying this public starter, keep examples generic. Real deployment
   domains, account names, transaction examples, D1 IDs, KV IDs, OAuth secrets,
   bearer tokens, and operational history belong only in a private fork.

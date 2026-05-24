@@ -1,0 +1,33 @@
+{
+  "cached": false,
+  "attempts": 1,
+  "briefing": {
+    "periodStart": "2026-05-18",
+    "periodEnd": "2026-05-24",
+    "kind": "weekly",
+    "summaryJson": {
+      "summary_text": "You spent $412.34 this week. The largest avoidable item was a $12 returned payment fee, and your recurring Demo Streaming subscription remains steady at $19.99.",
+      "insights": [
+        {
+          "merchant": "Returned Payment Fee",
+          "amount": 12,
+          "insight": "A returned payment fee appeared this week.",
+          "action": "Check the linked payment account before the next due date."
+        },
+        {
+          "merchant": "Demo Streaming",
+          "amount": 19.99,
+          "insight": "The subscription is stable and recurring monthly.",
+          "action": "Keep it only if it is still used."
+        },
+        {
+          "merchant": "Demo Grocery",
+          "amount": 84.16,
+          "insight": "Groceries were the largest normal operating spend this week.",
+          "action": "No action needed unless this is above your weekly target."
+        }
+      ]
+    },
+    "model": "@cf/meta/llama-3.1-8b-instruct"
+  }
+}

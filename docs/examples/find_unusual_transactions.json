@@ -1,0 +1,28 @@
+{
+  "unusual_transactions": [
+    {
+      "transaction_id": "txn_demo_001",
+      "account_name": "Demo Credit Card",
+      "merchant": "Demo Electronics",
+      "amount": -499,
+      "category": "shopping",
+      "posted_at": "2026-05-20T12:00:00.000Z",
+      "baseline": {
+        "comparison_group": "merchant",
+        "average_amount": 84.33,
+        "z_score": 2.4
+      },
+      "reason": "Large one-off purchase above merchant baseline."
+    }
+  ],
+  "explanation_status": "ai",
+  "explanation": {
+    "explanation": "The Demo Electronics purchase is unusual because it is much larger than prior transactions for the same merchant.",
+    "transactions": [
+      {
+        "transaction_id": "txn_demo_001",
+        "reason": "Above merchant baseline with no recurring pattern."
+      }
+    ]
+  }
+}

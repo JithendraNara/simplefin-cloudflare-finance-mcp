@@ -1,0 +1,39 @@
+{
+  "service": "simplefin-finance-mcp",
+  "generated_at": "2026-05-24T12:00:00.000Z",
+  "readiness": {
+    "ready": true,
+    "data_cached": true,
+    "last_sync_ok": true,
+    "data_fresh": true,
+    "account_coverage_healthy": true,
+    "enrichment_complete": true,
+    "semantic_index_complete": true
+  },
+  "scheduled_sync": {
+    "cron_utc": "15 12 * * *",
+    "cadence": "daily",
+    "verified_completed_run": true,
+    "verification_status": "verified"
+  },
+  "account_coverage": {
+    "healthy": true,
+    "source_accounts": 3,
+    "tracked_accounts": 3,
+    "warning_accounts": 0,
+    "needs_backfill_accounts": 0,
+    "transaction_count": 128
+  },
+  "ai_enrichment": {
+    "transactions": 128,
+    "ai_enriched": 126,
+    "fallback_enriched": 2,
+    "parse_fallback": 0,
+    "quota_fallback": 0,
+    "low_confidence_enriched": 9,
+    "healthy": true
+  },
+  "health": {
+    "issues": []
+  }
+}

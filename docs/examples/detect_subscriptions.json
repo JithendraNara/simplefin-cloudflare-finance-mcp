@@ -1,0 +1,34 @@
+{
+  "subscriptions": [
+    {
+      "merchant_key": "demo streaming",
+      "merchant": "Demo Streaming",
+      "category": "subscriptions",
+      "average_amount": 19.99,
+      "amount_stddev": 0,
+      "coefficient_of_variation": 0,
+      "interval_average_days": 30,
+      "interval_stddev_days": 1.2,
+      "occurrences": 3,
+      "first_seen": "2026-03-15T12:00:00.000Z",
+      "last_seen": "2026-05-14T12:00:00.000Z",
+      "score": 0.94,
+      "explicit_subscription_signal": true,
+      "ai_subscription_candidate": true
+    },
+    {
+      "merchant_key": "demo wireless",
+      "merchant": "Demo Wireless",
+      "category": "utilities",
+      "average_amount": 58.73,
+      "amount_stddev": 1.4,
+      "coefficient_of_variation": 0.024,
+      "interval_average_days": 29.5,
+      "interval_stddev_days": 1.5,
+      "occurrences": 3,
+      "score": 0.82,
+      "explicit_subscription_signal": false,
+      "ai_subscription_candidate": true
+    }
+  ]
+}
