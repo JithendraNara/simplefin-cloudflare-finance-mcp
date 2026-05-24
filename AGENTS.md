@@ -64,6 +64,10 @@ Agent usage rules:
   quality. Admin agents can use `correct_transaction`,
   `label_eval_transaction`, and `run_eval` to create a measurable feedback
   loop.
+- Eval labels are split-aware. Existing corrected labels belong in `train`;
+  quality claims should use `holdout` or `rolling_holdout`. Corrections refuse
+  transactions labeled as `holdout` so deployers do not leak evidence rows into
+  training/corrections.
 - Corrections are stored in D1, feed future categorization prompts as
   few-shot examples, and refresh the affected transaction's Vectorize
   embedding.

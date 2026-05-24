@@ -41,7 +41,8 @@ or quota problems, and other operational warnings.
 - `parse_fallback`: rows affected by model JSON parse problems
 - `quota_fallback`: rows affected by daily AI budget limits
 - `low_confidence_enriched`: successful but weak AI classifications
-- `low_confidence_threshold`: fixed threshold for the low-confidence count
+- `low_confidence_threshold`: threshold for the low-confidence count; derived
+  from holdout calibration when available, otherwise the default is used
 - `confidence_distribution`: confidence histogram for drift detection
 
 Do not treat `enriched_transactions == transactions` as proof that AI worked.
@@ -174,6 +175,11 @@ categorization prompts. `label_eval_transaction`, `run_eval`, and
 `get_eval_history` let deployers measure category precision/recall,
 subscription quality, merchant exact-match accuracy, and confidence
 calibration over time.
+
+Eval labels have `train`, `holdout`, and `rolling_holdout` splits. Quote
+holdout or rolling-holdout metrics for quality claims. Treat train metrics as
+regression diagnostics only, because train rows may be corrected and used as
+future prompt signal. Corrections refuse transactions labeled as holdout.
 
 Suggested taxonomy extensions:
 

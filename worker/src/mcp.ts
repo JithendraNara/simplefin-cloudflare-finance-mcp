@@ -403,6 +403,7 @@ export function createFinanceMcpServer(env: Env, auth: ToolAuth): McpServer {
           correctCategory: z.string().min(1),
           correctMerchantNormalized: z.string().min(1),
           correctIsSubscription: z.boolean(),
+          split: z.enum(["train", "holdout", "rolling_holdout"]).default("train"),
           notes: z.string().optional()
         }
       },
@@ -416,14 +417,15 @@ export function createFinanceMcpServer(env: Env, auth: ToolAuth): McpServer {
       "run_eval",
       {
         title: "Run Eval",
-        description: "Admin-only. Run calibration metrics against hand-labeled eval rows.",
+        description: "Admin-only. Run split-aware calibration metrics against hand-labeled eval rows.",
         inputSchema: {
-          modelVersion: z.string().optional()
+          modelVersion: z.string().optional(),
+          split: z.enum(["train", "holdout", "rolling_holdout"]).optional()
         }
       },
-      async ({ modelVersion }) => {
+      async ({ modelVersion, split }) => {
         requireAdmin(auth);
-        return result(await repo.runEval({ modelVersion }));
+        return result(await repo.runEval({ modelVersion, split }));
       }
     );
   }

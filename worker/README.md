@@ -244,10 +244,10 @@ The categorizer recognizes taxonomy extensions for hard finance cases:
 remain in the underlying spend category while recurring-obligation tools track
 the obligation pattern.
 
-`worker_operational_status.ai_enrichment` includes a fixed
-`low_confidence_threshold` plus a `confidence_distribution` histogram. Use these
-instead of assuming `enriched_transactions == transactions` means
-categorization quality is healthy.
+`worker_operational_status.ai_enrichment` includes `low_confidence_threshold`,
+its derivation, and a `confidence_distribution` histogram. When holdout
+calibration exists, the threshold comes from the lowest holdout confidence band
+with precision at or above 0.85; otherwise it falls back to the default.
 
 `merchant_summary` provides merchant-specific totals, trend, account/category
 distribution, weekday pattern, outliers, and recent rows. Use it before loading
@@ -259,9 +259,13 @@ fees and other obligation-like spend such as BNPL/installments.
 Learning feedback is D1-backed. `correct_transaction` records before/after
 values in `user_corrections`, refreshes the corrected transaction's Vectorize
 embedding, and feeds recent corrections into future categorization prompts.
-`label_eval_transaction` and `run_eval` create calibration history in
-`eval_labels` and `eval_runs`, so confidence values can be measured instead of
-treated as decorative model output.
+Holdout eval rows are protected: `correct_transaction` and `undo_correction`
+refuse transactions labeled with `split: "holdout"`.
+
+`label_eval_transaction` accepts `split: "train" | "holdout" |
+"rolling_holdout"`. `run_eval` reports per-split metrics, so train metrics can
+catch regressions against taught examples while holdout/rolling-holdout metrics
+carry quality claims.
 
 ## AI Routing
 

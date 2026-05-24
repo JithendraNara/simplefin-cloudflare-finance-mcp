@@ -1202,6 +1202,17 @@ export class FinanceRepository {
     return results;
   }
 
+  async assertTransactionNotHoldout(transactionId: string): Promise<void> {
+    const label = await this.env.DB.prepare(
+      `SELECT split FROM eval_labels WHERE transaction_id = ? LIMIT 1`
+    )
+      .bind(transactionId)
+      .first<{ split?: string }>();
+    if (normalizeEvalSplit(label?.split) === "holdout") {
+      throw new Error("Refusing to correct transaction in eval holdout set. Use label_eval_transaction to add to train set, or pick a non-holdout row.");
+    }
+  }
+
   async correctTransaction(options: {
     transactionId: string;
     corrections: {
@@ -1214,6 +1225,7 @@ export class FinanceRepository {
   }): Promise<Record<string, unknown>> {
     const transaction = (await this.transactionsByIds([options.transactionId]))[0];
     if (!transaction) throw new Error(`Transaction not found: ${options.transactionId}`);
+    await this.assertTransactionNotHoldout(transaction.id);
 
     const now = new Date().toISOString();
     const signalText = transactionText(transaction).slice(0, 1000);
@@ -1451,6 +1463,7 @@ export class FinanceRepository {
     if (!correction) throw new Error(`Correction not found: ${correctionId}`);
     const transaction = (await this.transactionsByIds([String(correction.transaction_id)]))[0];
     if (!transaction) throw new Error(`Transaction not found: ${String(correction.transaction_id)}`);
+    await this.assertTransactionNotHoldout(transaction.id);
 
     const restoredValue = parseJsonValue(correction.value_before);
     const current = {
@@ -1519,24 +1532,35 @@ export class FinanceRepository {
     correctCategory: string;
     correctMerchantNormalized: string;
     correctIsSubscription: boolean;
+    split?: string;
     labeledBy?: string;
     notes?: string;
   }): Promise<Record<string, unknown>> {
     const transaction = (await this.transactionsByIds([options.transactionId]))[0];
     if (!transaction) throw new Error(`Transaction not found: ${options.transactionId}`);
+    const split = normalizeEvalSplit(options.split);
     const id = crypto.randomUUID();
     const labeledAt = new Date().toISOString();
+    const existing = await this.env.DB.prepare(
+      `SELECT split FROM eval_labels WHERE transaction_id = ? LIMIT 1`
+    )
+      .bind(transaction.id)
+      .first<{ split?: string }>();
+    const splitChanged = !existing || normalizeEvalSplit(existing.split) !== split;
     await this.env.DB.prepare(
       `INSERT INTO eval_labels
-       (id, transaction_id, correct_category, correct_merchant_normalized, correct_is_subscription, labeled_at, labeled_by, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       (id, transaction_id, correct_category, correct_merchant_normalized, correct_is_subscription, labeled_at, labeled_by, notes, split, split_assigned_at, split_assigned_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(transaction_id) DO UPDATE SET
          correct_category = excluded.correct_category,
          correct_merchant_normalized = excluded.correct_merchant_normalized,
          correct_is_subscription = excluded.correct_is_subscription,
          labeled_at = excluded.labeled_at,
          labeled_by = excluded.labeled_by,
-         notes = excluded.notes`
+         notes = excluded.notes,
+         split = excluded.split,
+         split_assigned_at = CASE WHEN eval_labels.split <> excluded.split THEN excluded.split_assigned_at ELSE eval_labels.split_assigned_at END,
+         split_assigned_by = CASE WHEN eval_labels.split <> excluded.split THEN excluded.split_assigned_by ELSE eval_labels.split_assigned_by END`
     )
       .bind(
         id,
@@ -1546,7 +1570,10 @@ export class FinanceRepository {
         options.correctIsSubscription ? 1 : 0,
         labeledAt,
         options.labeledBy ?? null,
-        options.notes ?? null
+        options.notes ?? null,
+        split,
+        splitChanged ? labeledAt : null,
+        splitChanged ? options.labeledBy ?? null : null
       )
       .run();
     return {
@@ -1555,14 +1582,18 @@ export class FinanceRepository {
       correct_category: options.correctCategory,
       correct_merchant_normalized: normalizeStoredMerchant(options.correctMerchantNormalized),
       correct_is_subscription: options.correctIsSubscription,
+      split,
+      split_assigned_at: splitChanged ? labeledAt : existing ? null : labeledAt,
       labeled_at: labeledAt
     };
   }
 
-  async runEval(options: { modelVersion?: string } = {}): Promise<Record<string, unknown>> {
+  async runEval(options: { modelVersion?: string; split?: string } = {}): Promise<Record<string, unknown>> {
+    const splitFilter = options.split ? normalizeEvalSplit(options.split) : null;
     const { results } = await this.env.DB.prepare(
       `SELECT
         l.transaction_id,
+        COALESCE(l.split, 'train') AS split,
         l.correct_category,
         l.correct_merchant_normalized,
         l.correct_is_subscription,
@@ -1571,16 +1602,19 @@ export class FinanceRepository {
         COALESCE(e.is_subscription_candidate, 0) AS predicted_is_subscription,
         COALESCE(e.confidence, 0) AS confidence
        FROM eval_labels l
-       LEFT JOIN transaction_enrichment e ON e.transaction_id = l.transaction_id`
+       LEFT JOIN transaction_enrichment e ON e.transaction_id = l.transaction_id
+       ${splitFilter ? "WHERE COALESCE(l.split, 'train') = ?" : ""}`
     )
+      .bind(...(splitFilter ? [splitFilter] : []))
       .all<Record<string, unknown>>();
-    const summary = buildEvalSummary(results);
+    const summary = buildSplitEvalSummary(results, splitFilter ?? undefined);
     const startedAt = new Date().toISOString();
     const run = {
       id: crypto.randomUUID(),
       started_at: startedAt,
       model: options.modelVersion ?? "stored-enrichment",
-      prompt_hash: stableHash(JSON.stringify(summary.category_counts ?? {})),
+      prompt_hash: stableHash(JSON.stringify(summary.split_counts ?? summary)),
+      split: splitFilter ?? "all",
       label_count: results.length,
       results: summary
     };
@@ -1783,6 +1817,8 @@ export class FinanceRepository {
   }
 
   async aiEnrichmentHealth(): Promise<Record<string, unknown>> {
+    const calibration = await this.latestCalibration();
+    const threshold = derivedLowConfidenceThreshold(calibration) ?? LOW_CONFIDENCE_THRESHOLD;
     const row = await this.env.DB.prepare(
       `SELECT
         (SELECT COUNT(*) FROM transactions) AS transactions,
@@ -1798,10 +1834,9 @@ export class FinanceRepository {
         SUM(CASE WHEN e.confidence >= 0.9 THEN 1 ELSE 0 END) AS confidence_90_100
        FROM transaction_enrichment e`
     )
-      .bind(LOW_CONFIDENCE_THRESHOLD)
+      .bind(threshold)
       .first<Record<string, unknown>>();
     const corrections = await this.correctionStats();
-    const calibration = await this.latestCalibration();
     const transactions = Number(row?.transactions ?? 0);
     const fallback = Number(row?.fallback_enriched ?? 0);
     return {
@@ -1813,7 +1848,8 @@ export class FinanceRepository {
       quota_fallback: Number(row?.quota_fallback ?? 0),
       parse_fallback: Number(row?.parse_fallback ?? 0),
       low_confidence_enriched: Number(row?.low_confidence_enriched ?? 0),
-      low_confidence_threshold: LOW_CONFIDENCE_THRESHOLD,
+      low_confidence_threshold: threshold,
+      low_confidence_threshold_derivation: lowConfidenceThresholdDerivation(calibration, threshold),
       confidence_distribution: {
         "0.0-0.5": Number(row?.confidence_0_50 ?? 0),
         "0.5-0.7": Number(row?.confidence_50_70 ?? 0),
@@ -1858,14 +1894,38 @@ export class FinanceRepository {
     ).first<Record<string, unknown>>();
     if (!row) return null;
     const results = safeJson(row.results_json) as Record<string, unknown>;
+    if (results.results && typeof results.results === "object") {
+      const splitResults = results.results as Record<string, unknown>;
+      return {
+        eval_run_id: row.id,
+        started_at: row.started_at,
+        label_count: row.label_count,
+        train: calibrationBlock(splitResults.train),
+        holdout: calibrationBlock(splitResults.holdout),
+        rolling_holdout: calibrationBlock(splitResults.rolling_holdout),
+        active_threshold: {
+          value: derivedLowConfidenceThreshold({ holdout: calibrationBlock(splitResults.holdout) }) ?? LOW_CONFIDENCE_THRESHOLD,
+          derivation: lowConfidenceThresholdDerivation({ eval_run_id: row.id, holdout: calibrationBlock(splitResults.holdout) }, derivedLowConfidenceThreshold({ holdout: calibrationBlock(splitResults.holdout) }) ?? LOW_CONFIDENCE_THRESHOLD)
+        }
+      };
+    }
     return {
       eval_run_id: row.id,
       started_at: row.started_at,
       label_count: row.label_count,
-      confidence_calibration: results.confidence_calibration ?? null,
-      category_macro_f1: results.category_macro_f1 ?? null,
-      merchant_exact_match_accuracy: results.merchant_exact_match_accuracy ?? null,
-      subscription_f1: results.subscription_f1 ?? null
+      train: {
+        label_count: row.label_count,
+        confidence_calibration: results.confidence_calibration ?? null,
+        category_macro_f1: results.category_macro_f1 ?? null,
+        merchant_exact_match_accuracy: results.merchant_exact_match_accuracy ?? null,
+        subscription_f1: results.subscription_f1 ?? null
+      },
+      holdout: null,
+      rolling_holdout: null,
+      active_threshold: {
+        value: LOW_CONFIDENCE_THRESHOLD,
+        derivation: "default-0.75; no holdout calibration available"
+      }
     };
   }
 
@@ -2369,6 +2429,92 @@ function buildEvalSummary(rows: Record<string, unknown>[]): Record<string, unkno
   };
 }
 
+function buildSplitEvalSummary(rows: Record<string, unknown>[], splitFilter?: string): Record<string, unknown> {
+  const splits = ["train", "holdout", "rolling_holdout"];
+  const splitRows = new Map<string, Record<string, unknown>[]>();
+  for (const split of splits) splitRows.set(split, []);
+  for (const row of rows) {
+    const split = normalizeEvalSplit(String(row.split ?? "train"));
+    const existing = splitRows.get(split) ?? [];
+    existing.push(row);
+    splitRows.set(split, existing);
+  }
+  const results = Object.fromEntries(splits.map((split) => [split, buildEvalSummary(splitRows.get(split) ?? [])]));
+  const splitCounts = Object.fromEntries(splits.map((split) => [split, splitRows.get(split)?.length ?? 0]));
+  const activeQualitySplit = Number(splitCounts.rolling_holdout ?? 0) > 0
+    ? "rolling_holdout"
+    : Number(splitCounts.holdout ?? 0) > 0
+      ? "holdout"
+      : "train";
+  return {
+    status: rows.length > 0 ? "ok" : "no_labels",
+    label_count: rows.length,
+    split_filter: splitFilter ?? "all",
+    split_counts: splitCounts,
+    active_quality_split: activeQualitySplit,
+    quality_claim_rule: "Quote holdout or rolling_holdout metrics only. Train metrics are diagnostic because corrections and few-shots can leak into train.",
+    results
+  };
+}
+
+function calibrationBlock(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (record.status === "no_labels") {
+    return {
+      status: "no_labels",
+      label_count: 0,
+      confidence_calibration: null,
+      category_macro_f1: null,
+      merchant_exact_match_accuracy: null,
+      subscription_f1: null
+    };
+  }
+  return {
+    status: record.status ?? "ok",
+    label_count: record.label_count ?? 0,
+    confidence_calibration: record.confidence_calibration ?? null,
+    category_macro_f1: record.category_macro_f1 ?? null,
+    merchant_exact_match_accuracy: record.merchant_exact_match_accuracy ?? null,
+    subscription_f1: record.subscription_f1 ?? null
+  };
+}
+
+function derivedLowConfidenceThreshold(calibration: Record<string, unknown> | null): number | null {
+  const holdout = calibration?.holdout && typeof calibration.holdout === "object"
+    ? calibration.holdout as Record<string, unknown>
+    : null;
+  const curve = holdout?.confidence_calibration && typeof holdout.confidence_calibration === "object"
+    ? holdout.confidence_calibration as Record<string, unknown>
+    : null;
+  if (!curve) return null;
+  const orderedBands = [
+    ["0.0-0.5", 0.5],
+    ["0.5-0.6", 0.6],
+    ["0.6-0.7", 0.7],
+    ["0.7-0.8", 0.8],
+    ["0.8-0.9", 0.9],
+    ["0.9-1.0", 0.95]
+  ] as const;
+  for (const [band, threshold] of orderedBands) {
+    const stats = curve[band];
+    if (!stats || typeof stats !== "object") continue;
+    const precision = Number((stats as Record<string, unknown>).precision ?? 0);
+    const rows = Number((stats as Record<string, unknown>).rows ?? 0);
+    if (rows > 0 && precision >= 0.85) return threshold;
+  }
+  return null;
+}
+
+function lowConfidenceThresholdDerivation(calibration: Record<string, unknown> | null, threshold: number): string {
+  const evalRunId = calibration?.eval_run_id ? ` from eval_run_id ${String(calibration.eval_run_id)}` : "";
+  const holdout = calibration?.holdout as Record<string, unknown> | null | undefined;
+  if (holdout && holdout.status !== "no_labels" && derivedLowConfidenceThreshold(calibration) !== null) {
+    return `holdout-precision->=0.85${evalRunId}`;
+  }
+  return `default-${threshold}; no usable holdout calibration available`;
+}
+
 function confidenceBand(confidence: number): string {
   if (confidence < 0.5) return "0.0-0.5";
   if (confidence < 0.6) return "0.5-0.6";
@@ -2376,6 +2522,13 @@ function confidenceBand(confidence: number): string {
   if (confidence < 0.8) return "0.7-0.8";
   if (confidence < 0.9) return "0.8-0.9";
   return "0.9-1.0";
+}
+
+function normalizeEvalSplit(value: unknown): string {
+  const split = String(value ?? "train").trim();
+  if (split === "holdout") return "holdout";
+  if (split === "rolling_holdout") return "rolling_holdout";
+  return "train";
 }
 
 function stableHash(value: string): string {
