@@ -94,7 +94,7 @@ export async function generateBriefing(
   const priorSummary = await repo.summarizeCashflow({ startDate: priorStart, endDate: priorEnd });
   const trailing30Summary = await repo.summarizeCashflow({ startDate: trailing30Start, endDate: periodEnd });
   const subscriptions = await repo.detectSubscriptions();
-  const healthIssues = await repo.healthIssues();
+  const healthIssues = briefingHealthIssues(await repo.healthIssues());
   const compactSubscriptions = {
     subscriptions: Array.isArray(subscriptions.subscriptions) ? subscriptions.subscriptions.slice(0, 5) : []
   };
@@ -315,6 +315,7 @@ Rules:
 - Prefer trailing_30_days.top_fees, health_issues, unusual one-off purchases, and subscription changes over generic category summaries.
 - Do not choose tiny interest/fee items when a larger avoidable fee or interest item is present in trailing_30_days.top_fees.
 - Mention active data coverage issues, such as Apple Card or SimpleFIN errlist warnings, when health_issues includes them.
+- Do not mention internal tool names or agent instructions in human prose.
 - Describe subscription insights by dollar impact and concrete action, not by active duration.
 - Compare to the prior period when useful.
 - Do not say "review spending" unless the action names a concrete merchant/account behavior.
@@ -386,7 +387,7 @@ function normalizeEnrichments(parsed: Record<string, unknown>, transactions: Tra
       const base = {
         transaction_id: transactionId,
         category: typeof row.category === "string" ? row.category : "uncategorized",
-        merchant_normalized: typeof row.merchant_normalized === "string" ? row.merchant_normalized : "unknown",
+        merchant_normalized: normalizeMerchant(typeof row.merchant_normalized === "string" ? row.merchant_normalized : "unknown"),
         is_subscription_candidate: Boolean(row.is_subscription_candidate),
         confidence: clamp(Number(row.confidence), 0, 1),
         ai_reason: typeof row.ai_reason === "string" ? row.ai_reason.slice(0, 500) : "",
@@ -411,11 +412,12 @@ function applyCategoryGuards(transaction: TransactionRow, enrichment: Enrichment
   const text = transactionText(transaction).toLowerCase();
   const payee = String(transaction.payee ?? "").toLowerCase();
   const category = guardedCategory(text, payee, transaction.amount);
+  const merchant = normalizeTransactionMerchant(transaction, enrichment.merchant_normalized);
   if (!category || category === enrichment.category) {
     const confidence = enrichment.confidence <= 0 ? 0.7 : enrichment.confidence;
     return {
       ...enrichment,
-      merchant_normalized: normalizeMerchant(enrichment.merchant_normalized),
+      merchant_normalized: merchant,
       confidence,
       ai_reason: normalizeAiReason(enrichment.ai_reason, enrichment.category, confidence)
     };
@@ -423,10 +425,18 @@ function applyCategoryGuards(transaction: TransactionRow, enrichment: Enrichment
   return {
     ...enrichment,
     category,
+    merchant_normalized: merchant,
     is_subscription_candidate: category === "subscriptions" ? enrichment.is_subscription_candidate : false,
     confidence: Math.max(enrichment.confidence, 0.8),
     ai_reason: guardrailReason(enrichment.category, category, guardrailReasonFor(text, category))
   };
+}
+
+function briefingHealthIssues(issues: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return issues.map((issue) => {
+    const { actionable_hint: _agentOnlyHint, ...humanSafeIssue } = issue;
+    return humanSafeIssue;
+  });
 }
 
 function normalizeAiReason(reason: string, category: string, confidence: number): string {
@@ -498,11 +508,18 @@ function deterministicEnrichment(transaction: TransactionRow, model: string, err
 }
 
 function normalizeMerchant(text: string): string {
-  return text
+  const normalized = text
     .replace(/[^a-zA-Z0-9\s.'&/-]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 80) || "unknown";
+    .slice(0, 80)
+    .toLowerCase();
+  return normalized || "unknown";
+}
+
+function normalizeTransactionMerchant(transaction: TransactionRow, fallback: string): string {
+  const preferred = transaction.payee ?? fallback ?? transaction.description ?? "unknown";
+  return normalizeMerchant(String(preferred));
 }
 
 function parseJsonObject(text: string): Record<string, unknown> {

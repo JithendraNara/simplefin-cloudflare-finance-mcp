@@ -210,14 +210,18 @@ Weekly briefing generation requests structured JSON from Workers AI and retries
 once when the model returns invalid JSON. If both attempts fail, the Worker
 saves and returns a deterministic aggregate fallback instead of failing sync.
 Briefings receive current-period totals, prior-period totals, trailing-30-day
-fee totals, top subscriptions, unusual transactions, and `health.issues[]` so
-they can call out named merchants, amounts, data coverage issues, and concrete
-actions.
+fee totals, top subscriptions, unusual transactions, and human-safe
+`health.issues[]` messages so they can call out named merchants, amounts, data
+coverage issues, and concrete actions without repeating agent-only
+`actionable_hint` instructions.
 
 Transaction categorization uses structured Workers AI output plus deterministic
 guardrails for obvious card payments, returned payment fees, interest charges,
 known subscriptions, dining delivery, transport, and irregular merchants that
 should remain reviewable.
+The stored `merchant_normalized` value is lowercase by design; display layers
+can canonicalize names separately. When SimpleFIN provides a payee, that payee
+is preferred over model-generated merchant text to avoid spelling/case drift.
 
 ## Secure Operational Audit
 

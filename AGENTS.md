@@ -36,6 +36,12 @@ Agent usage rules:
 - Check `ai_enrichment.ai_enriched`, `fallback_enriched`, `parse_fallback`,
   and `quota_fallback` before trusting AI-derived categories, subscriptions,
   anomaly explanations, or briefings.
+- Status tools may include agent-only `actionable_hint` values. Briefing prompts
+  should use human-safe issue messages so final prose does not repeat tool
+  instructions.
+- Store `merchant_normalized` lowercase for stable per-row results and grouping;
+  prefer the SimpleFIN payee over model-generated merchant text when present;
+  display layers can canonicalize names separately.
 - Use `simplefin_raw_account` only for one `accountId` at a time with a narrow `limit`.
 - Prefer summaries and search tools over loading all transactions into context.
 - When modifying this public starter, keep examples generic. Real deployment

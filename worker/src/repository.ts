@@ -1057,7 +1057,7 @@ export class FinanceRepository {
         .bind(
           enrichment.transaction_id,
           enrichment.category,
-          enrichment.merchant_normalized,
+          normalizeStoredMerchant(enrichment.merchant_normalized),
           enrichment.is_subscription_candidate ? 1 : 0,
           enrichment.confidence,
           enrichment.ai_reason,
@@ -1592,6 +1592,16 @@ function subscriptionCategoryPrior(category: string, text: string): number {
 
 function normalizeMerchantKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim() || "unknown";
+}
+
+function normalizeStoredMerchant(value: string): string {
+  const normalized = value
+    .replace(/[^a-zA-Z0-9\s.'&/-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80)
+    .toLowerCase();
+  return normalized || "unknown";
 }
 
 function averageOf(values: number[]): number {

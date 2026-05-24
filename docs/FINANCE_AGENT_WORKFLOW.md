@@ -95,8 +95,10 @@ routine transfers and known recurring subscriptions.
 
 `generate_weekly_money_briefing` is expected to use current-period totals,
 prior-period totals, trailing-30-day fee totals, top subscriptions, unusual
-transactions, and `health.issues[]`. Briefings should name specific merchants,
-amounts, and actions instead of generic category advice.
+transactions, and human-safe `health.issues[]` messages. Agent-only
+`actionable_hint` values remain in status tools and should not appear in human
+briefing prose. Briefings should name specific merchants, amounts, and actions
+instead of generic category advice.
 
 ## Read-Only Tools
 

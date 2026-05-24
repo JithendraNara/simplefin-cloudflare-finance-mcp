@@ -226,8 +226,15 @@ that should remain reviewable.
 
 Weekly briefings receive compact current-period totals, prior-period totals,
 trailing-30-day fee totals, subscriptions, unusual transactions, and
-`health.issues[]`. This keeps briefings focused on named merchants, amounts,
-coverage issues, and concrete next actions.
+human-safe `health.issues[]` messages. Agent-only `actionable_hint` values stay
+in status tools so briefings stay focused on named merchants, amounts, coverage
+issues, and concrete next actions.
+
+Transaction enrichment stores `merchant_normalized` in lowercase so per-row
+responses and SQL grouping remain stable. When SimpleFIN provides a payee, that
+payee is preferred over model-generated merchant text to avoid spelling/case
+drift. User-facing aggregate displays may canonicalize or title-case merchant
+names separately.
 
 ## Smoke Tests
 
