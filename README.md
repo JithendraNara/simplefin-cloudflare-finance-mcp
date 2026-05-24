@@ -177,6 +177,7 @@ Read tools:
 - `detect_subscriptions`
 - `detect_recurring_obligations`
 - `merchant_summary`
+- `query_finance`
 - `list_corrections`
 - `get_eval_history`
 - `find_unusual_transactions`
@@ -188,6 +189,7 @@ Admin tools:
 - `claim_setup_token`
 - `categorize_uncategorized_transactions`
 - `correct_transaction`
+- `recategorize_low_confidence`
 - `undo_correction`
 - `label_eval_transaction`
 - `run_eval`

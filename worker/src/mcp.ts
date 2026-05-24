@@ -2,7 +2,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { requireAdmin } from "./auth.js";
-import { generateBriefing, categorizeTransactions, explainUnusualTransactions } from "./ai.js";
+import {
+  generateBriefing,
+  categorizeTransactions,
+  explainUnusualTransactions,
+  generateCorrectionRulesForCorrections,
+  queryFinance,
+  recategorizeLowConfidence
+} from "./ai.js";
 import { claimSetupToken } from "./simplefin.js";
 import { daysBefore, today } from "./http.js";
 import { FinanceRepository } from "./repository.js";
@@ -279,6 +286,19 @@ export function createFinanceMcpServer(env: Env, auth: ToolAuth): McpServer {
     async ({ merchant, days }) => result(await repo.merchantSummary({ merchant, days }))
   );
 
+  server.registerTool(
+    "query_finance",
+    {
+      title: "Query Finance",
+      description: "Answer a natural-language finance question from compact cached SimpleFIN summaries and narrow transaction matches using the configured reasoning provider.",
+      inputSchema: {
+        question: z.string().min(3).max(1000),
+        days: z.number().int().min(1).max(90).default(30)
+      }
+    },
+    async ({ question, days }) => result(await queryFinance(env, repo, { question, days }))
+  );
+
   if (auth.isAdmin) {
     server.registerTool(
       "categorize_uncategorized_transactions",
@@ -318,8 +338,38 @@ export function createFinanceMcpServer(env: Env, auth: ToolAuth): McpServer {
           note,
           correctedBy: auth.login ?? auth.authType ?? "admin"
         });
+        const correctionRules = await generateCorrectionRulesForCorrections(
+          env,
+          repo,
+          Array.isArray(corrected.corrections) ? corrected.corrections as Array<Record<string, unknown>> : []
+        );
         const indexing = await reindexTransaction(env, repo, transactionId);
-        return result({ ...corrected, indexing });
+        return result({ ...corrected, correction_rules: correctionRules, indexing });
+      }
+    );
+
+    server.registerTool(
+      "recategorize_low_confidence",
+      {
+        title: "Recategorize Low Confidence",
+        description: "Admin-only. Review low-confidence Workers AI categorization rows with the configured MiniMax fallback route; applying changes requires ENABLE_MINIMAX_CATEGORIZER_FALLBACK=true.",
+        inputSchema: {
+          limit: z.number().int().min(1).max(50).default(20),
+          apply: z.boolean().default(false),
+          threshold: z.number().min(0).max(1).default(0.75)
+        }
+      },
+      async ({ limit, apply, threshold }) => {
+        requireAdmin(auth);
+        const review = await recategorizeLowConfidence(env, repo, { limit, apply, threshold });
+        const appliedIds = Array.isArray(review.applied_transaction_ids)
+          ? review.applied_transaction_ids.filter((id): id is string => typeof id === "string")
+          : [];
+        const indexing = [];
+        for (const transactionId of appliedIds) {
+          indexing.push(await reindexTransaction(env, repo, transactionId));
+        }
+        return result({ ...review, indexing });
       }
     );
 
@@ -500,9 +550,10 @@ function agentGuidance(auth: ToolAuth): Record<string, unknown> {
 	      raw_account_rule: "Use simplefin_raw_account only for one accountId at a time; keep transaction limits narrow.",
 	      raw_transaction_rule: "Call get_transactions only for a narrow account/date/category question; prefer limit <= 100.",
 	      search_rule: "Use search_transactions or semantic_transaction_search for merchant/topic followups instead of loading all transactions.",
+	      natural_language_rule: "Use query_finance for multi-step natural-language questions that need synthesis across compact summaries and narrow transaction matches.",
 	      merchant_rule: "Use merchant_summary for merchant-specific questions instead of manually aggregating search results.",
 	      recurring_rule: "Use detect_recurring_obligations when the user asks about recurring monthly commitments beyond subscriptions.",
-	      learning_rule: "Use list_corrections and get_eval_history when judging categorization quality; admins can call correct_transaction and run_eval to improve and measure the system.",
+	      learning_rule: "Use list_corrections and get_eval_history when judging categorization quality; admins can call correct_transaction, recategorize_low_confidence, and run_eval to improve and measure the system.",
 	      sync_rule: "Do not sync before every question. The Worker syncs daily with a 3-day overlap; new/problem accounts get account-specific 90-day backfill."
 	    },
     permissions: authContext(auth),

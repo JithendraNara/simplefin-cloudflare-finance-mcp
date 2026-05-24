@@ -156,6 +156,7 @@ export class FinanceRepository {
 	    const accountCoverage = await this.accountCoverageSummary();
 	    const scheduledSync = await this.scheduledSyncStatus();
 	    const aiEnrichment = await this.aiEnrichmentHealth();
+    const minimaxRateLimit = await this.minimaxRateLimitStatus();
 	    const accountCoverageHealthy = accountCoverage.healthy !== false;
 	    const readiness = {
 	      ready: Boolean(lastSync?.status === "ok" && transactions > 0 && dataFreshness.fresh === true && accountCoverageHealthy),
@@ -183,6 +184,7 @@ export class FinanceRepository {
       minimax_tokens_today: aiTokenUsageToday
         .filter((row) => row.provider === "minimax_gateway")
         .reduce((sum, row) => sum + Number(row.total_tokens ?? 0), 0),
+      minimax_rate_limit: minimaxRateLimit,
       limits: {
         simplefin_sync_window_days_max: 90,
         manual_syncs_per_hour_without_force: 3,
@@ -1188,7 +1190,7 @@ export class FinanceRepository {
 
   async recentCorrectionExamples(limit = 20): Promise<Array<Record<string, unknown>>> {
     const { results } = await this.env.DB.prepare(
-      `SELECT c.field_corrected, c.value_before, c.value_after, c.signal_text, c.note, c.corrected_at
+      `SELECT c.field_corrected, c.value_before, c.value_after, c.signal_text, c.correction_rule_text, c.note, c.corrected_at
        FROM user_corrections c
        WHERE c.superseded_by IS NULL
          AND c.value_before <> c.value_after
@@ -1230,8 +1232,8 @@ export class FinanceRepository {
 
     await this.env.DB.prepare(
       `INSERT OR REPLACE INTO transaction_enrichment
-       (transaction_id, category, merchant_normalized, is_subscription_candidate, confidence, ai_reason, enriched_at, model)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+       (transaction_id, category, merchant_normalized, is_subscription_candidate, confidence, ai_reason, enriched_at, model, enrichment_source, manual_review_suggested)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
       .bind(
         transaction.id,
@@ -1241,7 +1243,9 @@ export class FinanceRepository {
         1,
         `User correction accepted; stored category is authoritative.`,
         now,
-        "user-correction"
+        "user-correction",
+        "user_correction",
+        0
       )
       .run();
 
@@ -1301,6 +1305,103 @@ export class FinanceRepository {
     };
   }
 
+  async lowConfidenceTransactions(options: { limit?: number; threshold?: number; reviewStaleDays?: number } = {}): Promise<TransactionRow[]> {
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 50));
+    const threshold = options.threshold ?? LOW_CONFIDENCE_THRESHOLD;
+    const reviewStaleDays = Math.max(1, Math.min(options.reviewStaleDays ?? 30, 365));
+    const staleBefore = new Date(Date.now() - reviewStaleDays * 24 * 60 * 60 * 1000).toISOString();
+    const { results } = await this.env.DB.prepare(
+      `${transactionSelectSql()}
+       WHERE e.transaction_id IS NOT NULL
+         AND e.confidence < ?
+         AND COALESCE(e.enrichment_source, 'workers_ai') <> 'user_correction'
+         AND (
+           e.last_minimax_review_at IS NULL
+           OR e.last_minimax_review_at < ?
+         )
+       ORDER BY e.confidence ASC, COALESCE(t.posted_at, t.transacted_at, 0) DESC
+       LIMIT ?`
+    )
+      .bind(threshold, staleBefore, limit)
+      .all<TransactionRow>();
+    return results;
+  }
+
+  async applyMinimaxFallbackEnrichment(transaction: TransactionRow, enrichment: Enrichment): Promise<void> {
+    const prior = {
+      category: transaction.category ?? null,
+      merchant_normalized: transaction.merchant_normalized ?? null,
+      is_subscription_candidate: Boolean(transaction.is_subscription_candidate),
+      confidence: transaction.confidence ?? null,
+      ai_reason: transaction.ai_reason ?? null,
+      model: transaction.model ?? null,
+      enrichment_source: transaction.enrichment_source ?? null
+    };
+    await this.env.DB.prepare(
+      `INSERT OR REPLACE INTO transaction_enrichment
+       (transaction_id, category, merchant_normalized, is_subscription_candidate, confidence, ai_reason, enriched_at,
+        model, enrichment_source, prior_enrichment_json, last_minimax_review_at, minimax_review_status, manual_review_suggested)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        transaction.id,
+        enrichment.category,
+        normalizeStoredMerchant(enrichment.merchant_normalized),
+        enrichment.is_subscription_candidate ? 1 : 0,
+        enrichment.confidence,
+        enrichment.ai_reason,
+        new Date().toISOString(),
+        enrichment.model,
+        "minimax_fallback",
+        JSON.stringify(prior),
+        new Date().toISOString(),
+        "applied",
+        0
+      )
+      .run();
+  }
+
+  async markMinimaxReview(transaction: TransactionRow, status: string, detail?: unknown): Promise<void> {
+    const prior = {
+      category: transaction.category ?? null,
+      merchant_normalized: transaction.merchant_normalized ?? null,
+      is_subscription_candidate: Boolean(transaction.is_subscription_candidate),
+      confidence: transaction.confidence ?? null,
+      ai_reason: transaction.ai_reason ?? null,
+      model: transaction.model ?? null,
+      enrichment_source: transaction.enrichment_source ?? null,
+      detail: detail instanceof Error ? detail.message : detail ? String(detail).slice(0, 500) : undefined
+    };
+    await this.env.DB.prepare(
+      `UPDATE transaction_enrichment
+       SET last_minimax_review_at = ?,
+           minimax_review_status = ?,
+           manual_review_suggested = ?,
+           prior_enrichment_json = COALESCE(prior_enrichment_json, ?)
+       WHERE transaction_id = ?`
+    )
+      .bind(
+        new Date().toISOString(),
+        status,
+        status === "manual_review_suggested" ? 1 : 0,
+        JSON.stringify(prior),
+        transaction.id
+      )
+      .run();
+  }
+
+  async saveCorrectionRuleText(correctionId: string, ruleText: string, model: string): Promise<void> {
+    await this.env.DB.prepare(
+      `UPDATE user_corrections
+       SET correction_rule_text = ?,
+           correction_rule_generated_at = ?,
+           correction_rule_model = ?
+       WHERE id = ?`
+    )
+      .bind(ruleText.trim().slice(0, 1000), new Date().toISOString(), model, correctionId)
+      .run();
+  }
+
   async listCorrections(options: { limit?: number; since?: string } = {}): Promise<Record<string, unknown>> {
     const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
     const since = options.since ? `${options.since}T00:00:00.000Z` : "1970-01-01T00:00:00.000Z";
@@ -1314,6 +1415,9 @@ export class FinanceRepository {
         c.value_before,
         c.value_after,
         c.signal_text,
+        c.correction_rule_text,
+        c.correction_rule_generated_at,
+        c.correction_rule_model,
         c.note,
         c.superseded_by,
         t.amount,
@@ -1363,8 +1467,8 @@ export class FinanceRepository {
     const undoId = crypto.randomUUID();
     await this.env.DB.prepare(
       `INSERT OR REPLACE INTO transaction_enrichment
-       (transaction_id, category, merchant_normalized, is_subscription_candidate, confidence, ai_reason, enriched_at, model)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+       (transaction_id, category, merchant_normalized, is_subscription_candidate, confidence, ai_reason, enriched_at, model, enrichment_source, manual_review_suggested)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
       .bind(
         transaction.id,
@@ -1374,7 +1478,9 @@ export class FinanceRepository {
         1,
         `User correction undo accepted; restored previous ${String(correction.field_corrected)}.`,
         now,
-        "user-correction"
+        "user-correction",
+        "user_correction",
+        0
       )
       .run();
     await this.env.DB.prepare(
@@ -1514,8 +1620,8 @@ export class FinanceRepository {
     for (const enrichment of enrichments) {
       await this.env.DB.prepare(
         `INSERT OR REPLACE INTO transaction_enrichment
-         (transaction_id, category, merchant_normalized, is_subscription_candidate, confidence, ai_reason, enriched_at, model)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+         (transaction_id, category, merchant_normalized, is_subscription_candidate, confidence, ai_reason, enriched_at, model, enrichment_source, manual_review_suggested)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
         .bind(
           enrichment.transaction_id,
@@ -1525,7 +1631,9 @@ export class FinanceRepository {
           enrichment.confidence,
           enrichment.ai_reason,
           new Date().toISOString(),
-          enrichment.model
+          enrichment.model,
+          enrichment.enrichment_source ?? "workers_ai",
+          enrichment.manual_review_suggested ? 1 : 0
         )
         .run();
     }
@@ -1564,7 +1672,7 @@ export class FinanceRepository {
     inputTokens?: number;
     outputTokens?: number;
     totalTokens?: number;
-    status: "ok" | "error";
+    status: "ok" | "error" | "rate_limited";
     error?: unknown;
   }): Promise<void> {
     await this.env.DB.prepare(
@@ -1606,6 +1714,63 @@ export class FinanceRepository {
       .bind(sinceIso)
       .all<Record<string, unknown>>();
     return results;
+  }
+
+  async aiTokenRequestCountsSince(sinceIso: string, provider?: string): Promise<Array<Record<string, unknown>>> {
+    const clauses = ["created_at >= ?", "status IN ('ok', 'error')"];
+    const values: string[] = [sinceIso];
+    if (provider) {
+      clauses.push("provider = ?");
+      values.push(provider);
+    }
+    const { results } = await this.env.DB.prepare(
+      `SELECT provider, task, COUNT(*) AS requests
+       FROM ai_token_usage
+       WHERE ${clauses.join(" AND ")}
+       GROUP BY provider, task`
+    )
+      .bind(...values)
+      .all<Record<string, unknown>>();
+    return results;
+  }
+
+  async minimaxRateLimitStatus(): Promise<Record<string, unknown>> {
+    const since = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
+    const counts = await this.aiTokenRequestCountsSince(since, "minimax_gateway");
+    const { results: limitedRows } = await this.env.DB.prepare(
+      `SELECT task, COUNT(*) AS rate_limited
+       FROM ai_token_usage
+       WHERE created_at >= ?
+         AND provider = 'minimax_gateway'
+         AND status = 'rate_limited'
+       GROUP BY task`
+    )
+      .bind(since)
+      .all<Record<string, unknown>>();
+    const byTask: Record<string, number> = {};
+    for (const row of counts) {
+      byTask[String(row.task)] = Number(row.requests ?? 0);
+    }
+    const rateLimitedByTask: Record<string, number> = {};
+    for (const row of limitedRows) {
+      rateLimitedByTask[String(row.task)] = Number(row.rate_limited ?? 0);
+    }
+    return {
+      window: "5h",
+      total_5hr_used: Object.values(byTask).reduce((sum, count) => sum + count, 0),
+      total_5hr_cap: 500,
+      by_task_used: byTask,
+      rate_limited_by_task: rateLimitedByTask,
+      by_task_caps: {
+        generate_weekly_money_briefing: 20,
+        find_unusual_transactions: 100,
+        query_finance: 200,
+        recategorize_low_confidence: 50,
+        generate_correction_rule_text: 100,
+        review_uncategorized_suggestions: 100
+      },
+      note: "MiniMax plan is request-capped; token counters are for debugging, not cost."
+    };
   }
 
   async dailyAiUsageCount(): Promise<number> {
@@ -1756,6 +1921,17 @@ export class FinanceRepository {
         source: "ai_enrichment",
         message: `${ai.quota_fallback} transactions fell back because the daily AI item limit was reached.`,
         actionable_hint: "Retry after the daily AI quota window resets or lower batch size."
+      });
+    }
+    const minimaxRateLimit = await this.minimaxRateLimitStatus();
+    const rateLimitedByTask = minimaxRateLimit.rate_limited_by_task as Record<string, unknown> | undefined;
+    const rateLimitedTotal = Object.values(rateLimitedByTask ?? {}).reduce<number>((sum, count) => sum + Number(count ?? 0), 0);
+    if (rateLimitedTotal > 0) {
+      issues.push({
+        severity: "warning",
+        source: "minimax_rate_limit",
+        message: `${rateLimitedTotal} MiniMax-routed request(s) fell back to Workers AI because the local 5-hour safety cap was reached.`,
+        actionable_hint: "Check worker_operational_status.minimax_rate_limit before retrying heavy reasoning tools."
       });
     }
     const confidenceDistribution = ai.confidence_distribution as Record<string, unknown> | undefined;
@@ -1921,7 +2097,13 @@ function transactionSelectSql(): string {
     e.merchant_normalized,
     e.is_subscription_candidate,
     e.confidence,
-    e.ai_reason
+    e.ai_reason,
+    e.model,
+    e.enrichment_source,
+    e.prior_enrichment_json,
+    e.last_minimax_review_at,
+    e.minimax_review_status,
+    e.manual_review_suggested
    FROM transactions t
    LEFT JOIN accounts a ON a.id = t.account_id
    LEFT JOIN transaction_enrichment e ON e.transaction_id = t.id`;

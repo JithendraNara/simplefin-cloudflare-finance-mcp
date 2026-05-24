@@ -206,8 +206,10 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 - `detect_subscriptions`
 - `detect_recurring_obligations`
 - `merchant_summary`
+- `query_finance`
 - `categorize_uncategorized_transactions`
 - `correct_transaction` (admin only)
+- `recategorize_low_confidence` (admin only)
 - `undo_correction` (admin only)
 - `label_eval_transaction` (admin only)
 - `run_eval` (admin only)
@@ -274,8 +276,14 @@ larger reasoning model only where it pays off:
   model.
 - `find_unusual_transactions`: deterministic anomaly selection plus optional
   Gateway-backed explanation generation.
-- `query_finance` and `review_uncategorized_suggestions`: reserved
-  latency-tolerant reasoning routes.
+- `query_finance`: optional Gateway-backed natural-language synthesis over
+  compact summaries and narrow transaction matches.
+- `recategorize_low_confidence`: optional Gateway-backed review for rows below
+  the confidence threshold. Writeback is gated by
+  `ENABLE_MINIMAX_CATEGORIZER_FALLBACK=true`.
+- `generate_correction_rule_text`: optional Gateway-backed reusable rule text
+  for corrections.
+- `review_uncategorized_suggestions`: reserved latency-tolerant reasoning route.
 
 Set route vars in `worker/wrangler.toml` and keep real Gateway credentials in
 the `AI_GATEWAY_TOKEN` secret:
@@ -285,18 +293,31 @@ AI_TEXT_PROVIDER = "workers_ai"
 AI_ROUTE_CATEGORIZE_TRANSACTIONS = "workers_ai"
 AI_ROUTE_FIND_UNUSUAL_TRANSACTIONS = "minimax_gateway"
 AI_ROUTE_GENERATE_WEEKLY_MONEY_BRIEFING = "minimax_gateway"
+AI_ROUTE_QUERY_FINANCE = "minimax_gateway"
+AI_ROUTE_REVIEW_UNCATEGORIZED_SUGGESTIONS = "minimax_gateway"
+AI_ROUTE_RECATEGORIZE_LOW_CONFIDENCE = "minimax_gateway"
+AI_ROUTE_GENERATE_CORRECTION_RULE_TEXT = "minimax_gateway"
 AI_GATEWAY_ACCOUNT_ID = "00000000000000000000000000000000"
 AI_GATEWAY_ID = "default"
 AI_GATEWAY_PROVIDER = "custom-minimax"
 MINIMAX_MODEL = "MiniMax-M2.7"
+MINIMAX_TOTAL_PER_5HOURS = "500"
+MINIMAX_LIMIT_GENERATE_WEEKLY_MONEY_BRIEFING = "20"
+MINIMAX_LIMIT_FIND_UNUSUAL_TRANSACTIONS = "100"
+MINIMAX_LIMIT_QUERY_FINANCE = "200"
+MINIMAX_LIMIT_RECATEGORIZE_LOW_CONFIDENCE = "50"
+MINIMAX_LIMIT_GENERATE_CORRECTION_RULE_TEXT = "100"
+MINIMAX_LIMIT_REVIEW_UNCATEGORIZED_SUGGESTIONS = "100"
+ENABLE_MINIMAX_CATEGORIZER_FALLBACK = "false"
 ```
 
 Gateway-backed reasoning models may emit reasoning blocks before final JSON.
 The Worker strips `<think>...</think>`, extracts balanced JSON candidates, and
 applies JSON repair before falling back.
 
-`worker_operational_status` exposes `ai_token_usage_today` and
-provider-specific token counters such as `minimax_tokens_today`.
+`worker_operational_status` exposes `ai_token_usage_today`,
+provider-specific token counters such as `minimax_tokens_today`, and the
+5-hour request limiter under `minimax_rate_limit`.
 
 ## Secure Operational Audit
 

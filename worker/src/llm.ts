@@ -6,7 +6,9 @@ export type AiTextTask =
   | "find_unusual_transactions"
   | "generate_weekly_money_briefing"
   | "query_finance"
-  | "review_uncategorized_suggestions";
+  | "review_uncategorized_suggestions"
+  | "recategorize_low_confidence"
+  | "generate_correction_rule_text";
 
 type GenerateTextOptions = {
   task: AiTextTask;
@@ -30,6 +32,17 @@ export async function generateAiText(
 ): Promise<GenerateTextResult> {
   const provider = providerForTask(env, options.task);
   if (provider === "minimax_gateway") {
+    const rateLimit = await minimaxRateLimitStatus(env, repo, options.task);
+    if (!rateLimit.allowed) {
+      await repo.saveAiTokenUsage({
+        task: options.task,
+        provider: "minimax_gateway",
+        model: env.MINIMAX_MODEL ?? "MiniMax-M2.7",
+        status: "rate_limited",
+        error: rateLimit.reason
+      });
+      return await generateWorkersAiText(env, options);
+    }
     return await generateMiniMaxText(env, repo, options);
   }
   return await generateWorkersAiText(env, options);
@@ -46,7 +59,46 @@ function routeValue(env: Env, task: AiTextTask): string {
   if (task === "categorize_transactions") return env.AI_ROUTE_CATEGORIZE_TRANSACTIONS ?? "workers_ai";
   if (task === "query_finance") return env.AI_ROUTE_QUERY_FINANCE ?? env.AI_TEXT_PROVIDER ?? "workers_ai";
   if (task === "review_uncategorized_suggestions") return env.AI_ROUTE_REVIEW_UNCATEGORIZED_SUGGESTIONS ?? env.AI_TEXT_PROVIDER ?? "workers_ai";
+  if (task === "recategorize_low_confidence") return env.AI_ROUTE_RECATEGORIZE_LOW_CONFIDENCE ?? env.AI_TEXT_PROVIDER ?? "workers_ai";
+  if (task === "generate_correction_rule_text") return env.AI_ROUTE_GENERATE_CORRECTION_RULE_TEXT ?? env.AI_TEXT_PROVIDER ?? "workers_ai";
   return "workers_ai";
+}
+
+async function minimaxRateLimitStatus(
+  env: Env,
+  repo: FinanceRepository,
+  task: AiTextTask
+): Promise<{ allowed: boolean; reason?: string }> {
+  const since = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
+  const rows = await repo.aiTokenRequestCountsSince(since, "minimax_gateway");
+  const totalUsed = rows.reduce((sum, row) => sum + Number(row.requests ?? 0), 0);
+  const taskUsed = rows
+    .filter((row) => row.task === task)
+    .reduce((sum, row) => sum + Number(row.requests ?? 0), 0);
+  const totalCap = envNumber(env.MINIMAX_TOTAL_PER_5HOURS, 500);
+  const taskCap = minimaxTaskCap(env, task);
+  if (totalUsed >= totalCap) {
+    return { allowed: false, reason: `minimax_total_per_5hours_exceeded:${totalUsed}/${totalCap}` };
+  }
+  if (taskUsed >= taskCap) {
+    return { allowed: false, reason: `minimax_task_per_5hours_exceeded:${task}:${taskUsed}/${taskCap}` };
+  }
+  return { allowed: true };
+}
+
+function minimaxTaskCap(env: Env, task: AiTextTask): number {
+  if (task === "generate_weekly_money_briefing") return envNumber(env.MINIMAX_LIMIT_GENERATE_WEEKLY_MONEY_BRIEFING, 20);
+  if (task === "find_unusual_transactions") return envNumber(env.MINIMAX_LIMIT_FIND_UNUSUAL_TRANSACTIONS, 100);
+  if (task === "query_finance") return envNumber(env.MINIMAX_LIMIT_QUERY_FINANCE, 200);
+  if (task === "recategorize_low_confidence") return envNumber(env.MINIMAX_LIMIT_RECATEGORIZE_LOW_CONFIDENCE, 50);
+  if (task === "generate_correction_rule_text") return envNumber(env.MINIMAX_LIMIT_GENERATE_CORRECTION_RULE_TEXT, 100);
+  if (task === "review_uncategorized_suggestions") return envNumber(env.MINIMAX_LIMIT_REVIEW_UNCATEGORIZED_SUGGESTIONS, 100);
+  return 100;
+}
+
+function envNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 async function generateWorkersAiText(env: Env, options: GenerateTextOptions): Promise<GenerateTextResult> {

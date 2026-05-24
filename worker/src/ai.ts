@@ -77,6 +77,204 @@ export async function categorizeTransactions(env: Env, repo: FinanceRepository, 
   };
 }
 
+export async function recategorizeLowConfidence(
+  env: Env,
+  repo: FinanceRepository,
+  options: { limit?: number; apply?: boolean; threshold?: number } = {}
+): Promise<Record<string, unknown>> {
+  const enabled = env.ENABLE_MINIMAX_CATEGORIZER_FALLBACK === "true";
+  const apply = Boolean(options.apply);
+  const threshold = options.threshold ?? 0.75;
+  const limit = Math.max(1, Math.min(options.limit ?? 20, 50));
+  const transactions = await repo.lowConfidenceTransactions({ limit, threshold });
+  const correctionExamples = await repo.recentCorrectionExamples(20);
+
+  if (transactions.length === 0) {
+    return { enabled, apply, reviewed: 0, applied: 0, manual_review_suggested: 0 };
+  }
+
+  const suggestions: Array<Record<string, unknown>> = [];
+  const appliedTransactionIds: string[] = [];
+  let manualReviewSuggested = 0;
+  let fallbackProviderCount = 0;
+  const failures: string[] = [];
+
+  for (const transaction of transactions) {
+    try {
+      const output = await generateAiText(env, repo, {
+        task: "recategorize_low_confidence",
+        workerModel: env.AI_MODEL ?? "@cf/meta/llama-3.1-8b-instruct",
+        maxTokens: 2500,
+        jsonSchema: categorizationSchema,
+        system: "You are reviewing one low-confidence bank transaction. Return one strict JSON object only.",
+        prompt: buildCategorizationPrompt([transaction], correctionExamples)
+      });
+      const enrichment = normalizeEnrichments(parseJsonObject(output.text), [transaction], output.model)[0];
+      const accepted = output.provider === "minimax_gateway" && enrichment.confidence >= 0.85;
+      suggestions.push({
+        transaction_id: transaction.id,
+        previous_category: transaction.category,
+        previous_merchant_normalized: transaction.merchant_normalized,
+        previous_confidence: transaction.confidence,
+        suggested_category: enrichment.category,
+        suggested_merchant_normalized: enrichment.merchant_normalized,
+        suggested_is_subscription_candidate: enrichment.is_subscription_candidate,
+        suggested_confidence: enrichment.confidence,
+        suggested_reason: enrichment.ai_reason,
+        provider: output.provider,
+        accepted_for_apply: accepted
+      });
+      await repo.saveAiUsage("recategorize_low_confidence", output.model, 1, "ok");
+      if (output.provider !== "minimax_gateway") {
+        fallbackProviderCount += 1;
+        if (apply && enabled) await repo.markMinimaxReview(transaction, "rate_limited_fallback_provider");
+        continue;
+      }
+      if (accepted && apply && enabled) {
+        await repo.applyMinimaxFallbackEnrichment(transaction, {
+          ...enrichment,
+          enrichment_source: "minimax_fallback",
+          prior_enrichment_json: null,
+          last_minimax_review_at: new Date().toISOString(),
+          minimax_review_status: "applied",
+          manual_review_suggested: false
+        });
+        appliedTransactionIds.push(transaction.id);
+      } else if (!accepted) {
+        manualReviewSuggested += 1;
+        if (apply && enabled) await repo.markMinimaxReview(transaction, "manual_review_suggested");
+      }
+    } catch (error) {
+      await repo.saveAiUsage("recategorize_low_confidence", modelForTask(env, "recategorize_low_confidence"), 1, "error", error);
+      await repo.markMinimaxReview(transaction, "error", error);
+      failures.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return {
+    enabled,
+    apply_requested: apply,
+    apply_performed: apply && enabled,
+    threshold,
+    reviewed: transactions.length,
+    applied: appliedTransactionIds.length,
+    applied_transaction_ids: appliedTransactionIds,
+    manual_review_suggested: manualReviewSuggested,
+    fallback_provider_count: fallbackProviderCount,
+    suggestions,
+    failures: failures.slice(0, 5),
+    disabled_reason: apply && !enabled ? "ENABLE_MINIMAX_CATEGORIZER_FALLBACK is not true" : undefined
+  };
+}
+
+export async function generateCorrectionRulesForCorrections(
+  env: Env,
+  repo: FinanceRepository,
+  corrections: Array<Record<string, unknown>>
+): Promise<Record<string, unknown>> {
+  const rows = corrections
+    .filter((correction) => typeof correction.id === "string")
+    .slice(0, 10);
+  if (rows.length === 0) return { generated: 0, rules: [] };
+
+  try {
+    const output = await generateAiText(env, repo, {
+      task: "generate_correction_rule_text",
+      workerModel: env.AI_MODEL ?? "@cf/meta/llama-3.1-8b-instruct",
+      maxTokens: 1800,
+      jsonSchema: correctionRuleSchema,
+      system: "Turn user finance corrections into compact future categorization rules. Return strict JSON only.",
+      prompt: JSON.stringify({
+        instructions: "For each correction, write one short reusable rule. Mention the merchant or phrase signal and the corrected value. Do not include private account numbers.",
+        corrections: rows.map((correction) => ({
+          correction_id: correction.id,
+          field_corrected: correction.field_corrected,
+          value_before: correction.value_before,
+          value_after: correction.value_after,
+          signal_text: String(correction.signal_text ?? "").replace(/\b\d{4,}\b/g, "ending xxxx").slice(0, 500),
+          note: correction.note
+        }))
+      })
+    });
+    const parsed = parseJsonObject(output.text);
+    const rules = Array.isArray(parsed.rules) ? parsed.rules : [];
+    const saved: Array<Record<string, unknown>> = [];
+    for (const rule of rules) {
+      if (!rule || typeof rule !== "object") continue;
+      const record = rule as Record<string, unknown>;
+      const correctionId = String(record.correction_id ?? "");
+      const ruleText = String(record.correction_rule_text ?? "").trim();
+      if (!correctionId || !ruleText) continue;
+      await repo.saveCorrectionRuleText(correctionId, ruleText, output.model);
+      saved.push({ correction_id: correctionId, correction_rule_text: ruleText, model: output.model });
+    }
+    await repo.saveAiUsage("generate_correction_rule_text", output.model, rows.length, "ok");
+    return { generated: saved.length, rules: saved, provider: output.provider };
+  } catch (error) {
+    await repo.saveAiUsage("generate_correction_rule_text", modelForTask(env, "generate_correction_rule_text"), rows.length, "error", error);
+    return {
+      generated: 0,
+      rules: [],
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+export async function queryFinance(
+  env: Env,
+  repo: FinanceRepository,
+  options: { question: string; days?: number }
+): Promise<Record<string, unknown>> {
+  const question = options.question.trim();
+  if (!question) throw new Error("question is required");
+  const days = Math.max(1, Math.min(options.days ?? 30, 90));
+  const overview = await repo.financeOverview({ days });
+  const recurring = await repo.detectRecurringObligations();
+  const searchQuery = compactSearchQuery(question);
+  const matchingTransactions = searchQuery
+    ? await repo.searchTransactions({ query: searchQuery, limit: 50 })
+    : [];
+
+  try {
+    const output = await generateAiText(env, repo, {
+      task: "query_finance",
+      workerModel: env.AI_MODEL ?? "@cf/meta/llama-3.1-8b-instruct",
+      maxTokens: 3500,
+      jsonSchema: queryFinanceSchema,
+      system: "Answer finance questions from the supplied cached SimpleFIN data only. Return strict JSON only. Do not invent missing data.",
+      prompt: JSON.stringify({
+        question,
+        days,
+        available_data: {
+          finance_overview: overview,
+          recurring_obligations: recurring,
+          matching_transactions: matchingTransactions.slice(0, 50)
+        },
+        required_shape: queryFinanceSchema,
+        rules: [
+          "Say when the supplied cache is insufficient for part of the question.",
+          "Use exact merchant names, amounts, and date windows from the data.",
+          "Exclude transfers from operating spend unless the user explicitly asks for payments or transfers.",
+          "Keep answer_text concise and put math in supporting_facts."
+        ]
+      })
+    });
+    const parsed = parseJsonObject(output.text);
+    await repo.saveAiUsage("query_finance", output.model, 1, "ok");
+    return {
+      question,
+      days,
+      provider: output.provider,
+      model: output.model,
+      search_query_used: searchQuery || null,
+      ...validateQueryFinance(parsed)
+    };
+  } catch (error) {
+    await repo.saveAiUsage("query_finance", modelForTask(env, "query_finance"), 1, "error", error);
+    throw error;
+  }
+}
+
 export async function generateBriefing(
   env: Env,
   repo: FinanceRepository,
@@ -252,7 +450,10 @@ export function extractText(output: unknown): string {
   return JSON.stringify(output);
 }
 
-function modelForTask(env: Env, task: "generate_weekly_money_briefing" | "find_unusual_transactions"): string {
+function modelForTask(
+  env: Env,
+  task: "generate_weekly_money_briefing" | "find_unusual_transactions" | "recategorize_low_confidence" | "generate_correction_rule_text" | "query_finance"
+): string {
   if (providerForTask(env, task) === "minimax_gateway") {
     return `minimax_gateway:${env.MINIMAX_MODEL ?? "MiniMax-M2.7"}`;
   }
@@ -279,6 +480,51 @@ const categorizationSchema = {
     }
   },
   required: ["transactions"]
+};
+
+const correctionRuleSchema = {
+  type: "object",
+  properties: {
+    rules: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          correction_id: { type: "string" },
+          correction_rule_text: { type: "string" }
+        },
+        required: ["correction_id", "correction_rule_text"]
+      }
+    }
+  },
+  required: ["rules"]
+};
+
+const queryFinanceSchema = {
+  type: "object",
+  properties: {
+    answer_text: { type: "string" },
+    plan: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          step: { type: "string" },
+          data_used: { type: "string" }
+        },
+        required: ["step", "data_used"]
+      }
+    },
+    supporting_facts: {
+      type: "array",
+      items: { type: "string" }
+    },
+    caveats: {
+      type: "array",
+      items: { type: "string" }
+    }
+  },
+  required: ["answer_text", "plan", "supporting_facts", "caveats"]
 };
 
 const briefingSchema = {
@@ -342,6 +588,34 @@ function validateBriefing(value: Record<string, unknown>): Record<string, unknow
   return value;
 }
 
+function validateQueryFinance(value: Record<string, unknown>): Record<string, unknown> {
+  if (typeof value.answer_text !== "string") {
+    throw new Error("query_finance response missing answer_text");
+  }
+  return {
+    answer_text: value.answer_text,
+    plan: Array.isArray(value.plan) ? value.plan.slice(0, 8) : [],
+    supporting_facts: Array.isArray(value.supporting_facts) ? value.supporting_facts.slice(0, 12) : [],
+    caveats: Array.isArray(value.caveats) ? value.caveats.slice(0, 8) : []
+  };
+}
+
+function compactSearchQuery(question: string): string {
+  const stopwords = new Set([
+    "what", "when", "where", "which", "how", "much", "many", "did", "spend", "spent",
+    "last", "this", "month", "week", "year", "versus", "with", "from", "that", "have",
+    "show", "tell", "about", "excluding", "include", "including", "compare", "between",
+    "before", "after", "over", "under", "than", "and", "the", "for"
+  ]);
+  const words = question
+    .toLowerCase()
+    .replace(/[^a-z0-9 .*/-]+/g, " ")
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length >= 3 && !stopwords.has(word));
+  return [...new Set(words)].slice(0, 4).join(" ");
+}
+
 const unusualTransactionsSchema = {
   type: "object",
   properties: {
@@ -399,10 +673,10 @@ function formatCorrectionExamples(corrections: Array<Record<string, unknown>>): 
     const field = String(correction.field_corrected ?? "field");
     const before = parsePromptValue(correction.value_before);
     const after = parsePromptValue(correction.value_after);
-    const signal = String(correction.signal_text ?? "").replace(/\s+/g, " ").slice(0, 180);
+    const signal = String(correction.correction_rule_text ?? correction.signal_text ?? "").replace(/\s+/g, " ").slice(0, 220);
     const note = correction.note ? `; note: ${String(correction.note).slice(0, 120)}` : "";
     const existing = grouped.get(field) ?? [];
-    existing.push(`- Description "${signal}" -> ${field} ${String(after)} (not ${String(before)})${note}`);
+    existing.push(`- ${signal} -> ${field} ${String(after)} (not ${String(before)})${note}`);
     grouped.set(field, existing);
   }
   return [...grouped.entries()]
