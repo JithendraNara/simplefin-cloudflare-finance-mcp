@@ -272,7 +272,7 @@ larger reasoning model only where it pays off:
   corrections, and merchant canonicalization.
 - `semantic_index_transaction` / `semantic_reindex_transaction`: Workers AI
   embeddings through `EMBEDDING_MODEL`.
-- `generate_weekly_money_briefing`: optional MiniMax or another Gateway-backed
+- `generate_weekly_money_briefing`: optional Gateway-backed
   model.
 - `find_unusual_transactions`: deterministic anomaly selection plus optional
   Gateway-backed explanation generation.
@@ -280,7 +280,7 @@ larger reasoning model only where it pays off:
   compact summaries and narrow transaction matches.
 - `recategorize_low_confidence`: optional Gateway-backed review for rows below
   the confidence threshold. Writeback is gated by
-  `ENABLE_MINIMAX_CATEGORIZER_FALLBACK=true`.
+  `ENABLE_GATEWAY_CATEGORIZER_FALLBACK=true`.
 - `generate_correction_rule_text`: optional Gateway-backed reusable rule text
   for corrections.
 - `review_uncategorized_suggestions`: reserved latency-tolerant reasoning route.
@@ -291,24 +291,24 @@ the `AI_GATEWAY_TOKEN` secret:
 ```toml
 AI_TEXT_PROVIDER = "workers_ai"
 AI_ROUTE_CATEGORIZE_TRANSACTIONS = "workers_ai"
-AI_ROUTE_FIND_UNUSUAL_TRANSACTIONS = "minimax_gateway"
-AI_ROUTE_GENERATE_WEEKLY_MONEY_BRIEFING = "minimax_gateway"
-AI_ROUTE_QUERY_FINANCE = "minimax_gateway"
-AI_ROUTE_REVIEW_UNCATEGORIZED_SUGGESTIONS = "minimax_gateway"
-AI_ROUTE_RECATEGORIZE_LOW_CONFIDENCE = "minimax_gateway"
-AI_ROUTE_GENERATE_CORRECTION_RULE_TEXT = "minimax_gateway"
+AI_ROUTE_FIND_UNUSUAL_TRANSACTIONS = "gateway"
+AI_ROUTE_GENERATE_WEEKLY_MONEY_BRIEFING = "gateway"
+AI_ROUTE_QUERY_FINANCE = "gateway"
+AI_ROUTE_REVIEW_UNCATEGORIZED_SUGGESTIONS = "gateway"
+AI_ROUTE_RECATEGORIZE_LOW_CONFIDENCE = "gateway"
+AI_ROUTE_GENERATE_CORRECTION_RULE_TEXT = "gateway"
 AI_GATEWAY_ACCOUNT_ID = "00000000000000000000000000000000"
 AI_GATEWAY_ID = "default"
-AI_GATEWAY_PROVIDER = "custom-minimax"
-MINIMAX_MODEL = "MiniMax-M2.7"
-MINIMAX_TOTAL_PER_5HOURS = "500"
-MINIMAX_LIMIT_GENERATE_WEEKLY_MONEY_BRIEFING = "20"
-MINIMAX_LIMIT_FIND_UNUSUAL_TRANSACTIONS = "100"
-MINIMAX_LIMIT_QUERY_FINANCE = "200"
-MINIMAX_LIMIT_RECATEGORIZE_LOW_CONFIDENCE = "50"
-MINIMAX_LIMIT_GENERATE_CORRECTION_RULE_TEXT = "100"
-MINIMAX_LIMIT_REVIEW_UNCATEGORIZED_SUGGESTIONS = "100"
-ENABLE_MINIMAX_CATEGORIZER_FALLBACK = "false"
+AI_GATEWAY_PROVIDER = "custom-provider"
+AI_GATEWAY_MODEL = "provider-model-name"
+GATEWAY_TOTAL_PER_5HOURS = "500"
+GATEWAY_LIMIT_GENERATE_WEEKLY_MONEY_BRIEFING = "20"
+GATEWAY_LIMIT_FIND_UNUSUAL_TRANSACTIONS = "100"
+GATEWAY_LIMIT_QUERY_FINANCE = "200"
+GATEWAY_LIMIT_RECATEGORIZE_LOW_CONFIDENCE = "50"
+GATEWAY_LIMIT_GENERATE_CORRECTION_RULE_TEXT = "100"
+GATEWAY_LIMIT_REVIEW_UNCATEGORIZED_SUGGESTIONS = "100"
+ENABLE_GATEWAY_CATEGORIZER_FALLBACK = "false"
 ```
 
 Gateway-backed reasoning models may emit reasoning blocks before final JSON.
@@ -316,8 +316,12 @@ The Worker strips `<think>...</think>`, extracts balanced JSON candidates, and
 applies JSON repair before falling back.
 
 `worker_operational_status` exposes `ai_token_usage_today`,
-provider-specific token counters such as `minimax_tokens_today`, and the
-5-hour request limiter under `minimax_rate_limit`.
+provider-specific token counters such as `gateway_tokens_today`, and the
+5-hour request limiter under `gateway_rate_limit`.
+
+MiniMax-compatible custom providers work with this shape, but they are only one
+example. Any OpenAI-compatible Cloudflare AI Gateway provider can fill the
+reasoning route.
 
 ## Secure Operational Audit
 

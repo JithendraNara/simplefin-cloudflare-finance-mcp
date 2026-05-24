@@ -38,14 +38,14 @@ Agent usage rules:
   anomaly explanations, or briefings.
 - Keep categorization on Workers AI plus deterministic rules/corrections unless
   your own eval proves another provider preserves merchant normalization,
-  latency, and parse reliability. Use Gateway-backed models such as MiniMax for
+  latency, and parse reliability. Use Gateway-backed models for
   slower reasoning tasks like weekly briefings, anomaly explanations,
   `query_finance`, correction-rule generation, and low-confidence review
   suggestions.
 - Request-capped Gateway providers still need local safety caps. Preserve the
-  5-hour MiniMax limiter and expose `worker_operational_status.minimax_rate_limit`.
+  5-hour Gateway limiter and expose `worker_operational_status.gateway_rate_limit`.
 - `recategorize_low_confidence` should default to preview/non-writeback mode.
-  Writeback requires `ENABLE_MINIMAX_CATEGORIZER_FALLBACK=true`.
+  Writeback requires `ENABLE_GATEWAY_CATEGORIZER_FALLBACK=true`.
 - Gateway-backed reasoning models may emit `<think>...</think>` before JSON.
   Preserve the shared parser cleanup path and check
   `worker_operational_status.ai_token_usage_today` plus provider token counters

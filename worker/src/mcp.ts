@@ -352,7 +352,7 @@ export function createFinanceMcpServer(env: Env, auth: ToolAuth): McpServer {
       "recategorize_low_confidence",
       {
         title: "Recategorize Low Confidence",
-        description: "Admin-only. Review low-confidence Workers AI categorization rows with the configured MiniMax fallback route; applying changes requires ENABLE_MINIMAX_CATEGORIZER_FALLBACK=true.",
+        description: "Admin-only. Review low-confidence Workers AI categorization rows with the configured AI Gateway fallback route; applying changes requires ENABLE_GATEWAY_CATEGORIZER_FALLBACK=true.",
         inputSchema: {
           limit: z.number().int().min(1).max(50).default(20),
           apply: z.boolean().default(false),

@@ -87,7 +87,7 @@ embeddings. SQL totals, account coverage, sync status, and raw SimpleFIN
 diagnostics remain deterministic.
 
 The Worker also supports optional per-task routing through Cloudflare AI
-Gateway. A larger model such as MiniMax M2.7 is best used for
+Gateway. A larger BYOK model is best used for
 latency-tolerant reasoning tasks such as weekly briefings, unusual-transaction
 explanations, `query_finance`, correction-rule generation, and low-confidence
 review suggestions. Keep the main categorizer on Workers AI plus deterministic
@@ -95,7 +95,7 @@ rules/corrections unless your own eval proves the alternate provider preserves
 merchant normalization and parse reliability.
 
 Request-capped providers still need safety caps against loops. Check
-`worker_operational_status.minimax_rate_limit`; if a cap is hit, the route
+`worker_operational_status.gateway_rate_limit`; if a cap is hit, the route
 falls back to Workers AI where possible.
 
 Categorization uses structured JSON output, JSON repair/validation, and

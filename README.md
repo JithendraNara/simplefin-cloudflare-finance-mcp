@@ -25,7 +25,7 @@ no Cloudflare resource IDs, and no personal deployment history.
 - Scheduled SimpleFIN sync with a 3-day incremental overlap
 - Automatic account-specific 90-day backfill for new/problem accounts
 - D1 cache with normalized accounts, transactions, sync runs, coverage, and audit events
-- Workers AI transaction categorization with optional MiniMax reasoning routes
+- Workers AI transaction categorization with optional Cloudflare AI Gateway reasoning routes
   through Cloudflare AI Gateway
 - Honest AI health counters: real AI enrichments, deterministic fallbacks, parse failures, quota fallbacks, and low-confidence rows
 - Deterministic category guardrails for obvious payments, fees, subscriptions, dining, and one-off purchases
@@ -111,7 +111,7 @@ flowchart LR
   oauth["GitHub OAuth<br/>allowed login"]
   d1["D1<br/>finance cache + audit"]
   ai["Workers AI<br/>hot-path categorization + embeddings"]
-  gateway["Cloudflare AI Gateway<br/>optional MiniMax reasoning"]
+  gateway["Cloudflare AI Gateway<br/>optional BYOK reasoning model"]
   vector["Vectorize<br/>semantic transaction search"]
   simplefin["SimpleFIN Bridge<br/>/accounts?version=2"]
   cron["Cloudflare Cron<br/>daily incremental sync"]

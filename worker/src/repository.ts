@@ -181,10 +181,10 @@ export class FinanceRepository {
       recent_syncs: recentSyncs,
       ai_usage_today: aiUsageToday,
       ai_token_usage_today: aiTokenUsageToday,
-      minimax_tokens_today: aiTokenUsageToday
-        .filter((row) => row.provider === "minimax_gateway")
+      gateway_tokens_today: aiTokenUsageToday
+        .filter((row) => row.provider === "gateway")
         .reduce((sum, row) => sum + Number(row.total_tokens ?? 0), 0),
-      minimax_rate_limit: minimaxRateLimit,
+      gateway_rate_limit: minimaxRateLimit,
       limits: {
         simplefin_sync_window_days_max: 90,
         manual_syncs_per_hour_without_force: 3,
@@ -1736,12 +1736,12 @@ export class FinanceRepository {
 
   async minimaxRateLimitStatus(): Promise<Record<string, unknown>> {
     const since = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
-    const counts = await this.aiTokenRequestCountsSince(since, "minimax_gateway");
+    const counts = await this.aiTokenRequestCountsSince(since, "gateway");
     const { results: limitedRows } = await this.env.DB.prepare(
       `SELECT task, COUNT(*) AS rate_limited
        FROM ai_token_usage
        WHERE created_at >= ?
-         AND provider = 'minimax_gateway'
+         AND provider = 'gateway'
          AND status = 'rate_limited'
        GROUP BY task`
     )
@@ -1769,7 +1769,7 @@ export class FinanceRepository {
         generate_correction_rule_text: 100,
         review_uncategorized_suggestions: 100
       },
-      note: "MiniMax plan is request-capped; token counters are for debugging, not cost."
+      note: "Gateway provider plans can be request-capped or token-metered; token counters are debugging signals and local request caps protect against loops."
     };
   }
 
@@ -1929,9 +1929,9 @@ export class FinanceRepository {
     if (rateLimitedTotal > 0) {
       issues.push({
         severity: "warning",
-        source: "minimax_rate_limit",
-        message: `${rateLimitedTotal} MiniMax-routed request(s) fell back to Workers AI because the local 5-hour safety cap was reached.`,
-        actionable_hint: "Check worker_operational_status.minimax_rate_limit before retrying heavy reasoning tools."
+        source: "gateway_rate_limit",
+        message: `${rateLimitedTotal} Gateway-routed request(s) fell back to Workers AI because the local 5-hour safety cap was reached.`,
+        actionable_hint: "Check worker_operational_status.gateway_rate_limit before retrying heavy reasoning tools."
       });
     }
     const confidenceDistribution = ai.confidence_distribution as Record<string, unknown> | undefined;

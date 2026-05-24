@@ -82,7 +82,7 @@ export async function recategorizeLowConfidence(
   repo: FinanceRepository,
   options: { limit?: number; apply?: boolean; threshold?: number } = {}
 ): Promise<Record<string, unknown>> {
-  const enabled = env.ENABLE_MINIMAX_CATEGORIZER_FALLBACK === "true";
+  const enabled = (env.ENABLE_GATEWAY_CATEGORIZER_FALLBACK ?? env.ENABLE_MINIMAX_CATEGORIZER_FALLBACK) === "true";
   const apply = Boolean(options.apply);
   const threshold = options.threshold ?? 0.75;
   const limit = Math.max(1, Math.min(options.limit ?? 20, 50));
@@ -110,7 +110,7 @@ export async function recategorizeLowConfidence(
         prompt: buildCategorizationPrompt([transaction], correctionExamples)
       });
       const enrichment = normalizeEnrichments(parseJsonObject(output.text), [transaction], output.model)[0];
-      const accepted = output.provider === "minimax_gateway" && enrichment.confidence >= 0.85;
+      const accepted = output.provider === "gateway" && enrichment.confidence >= 0.85;
       suggestions.push({
         transaction_id: transaction.id,
         previous_category: transaction.category,
@@ -125,7 +125,7 @@ export async function recategorizeLowConfidence(
         accepted_for_apply: accepted
       });
       await repo.saveAiUsage("recategorize_low_confidence", output.model, 1, "ok");
-      if (output.provider !== "minimax_gateway") {
+      if (output.provider !== "gateway") {
         fallbackProviderCount += 1;
         if (apply && enabled) await repo.markMinimaxReview(transaction, "rate_limited_fallback_provider");
         continue;
@@ -133,7 +133,7 @@ export async function recategorizeLowConfidence(
       if (accepted && apply && enabled) {
         await repo.applyMinimaxFallbackEnrichment(transaction, {
           ...enrichment,
-          enrichment_source: "minimax_fallback",
+          enrichment_source: "gateway_fallback",
           prior_enrichment_json: null,
           last_minimax_review_at: new Date().toISOString(),
           minimax_review_status: "applied",
@@ -163,7 +163,7 @@ export async function recategorizeLowConfidence(
     fallback_provider_count: fallbackProviderCount,
     suggestions,
     failures: failures.slice(0, 5),
-    disabled_reason: apply && !enabled ? "ENABLE_MINIMAX_CATEGORIZER_FALLBACK is not true" : undefined
+    disabled_reason: apply && !enabled ? "ENABLE_GATEWAY_CATEGORIZER_FALLBACK is not true" : undefined
   };
 }
 
@@ -454,8 +454,8 @@ function modelForTask(
   env: Env,
   task: "generate_weekly_money_briefing" | "find_unusual_transactions" | "recategorize_low_confidence" | "generate_correction_rule_text" | "query_finance"
 ): string {
-  if (providerForTask(env, task) === "minimax_gateway") {
-    return `minimax_gateway:${env.MINIMAX_MODEL ?? "MiniMax-M2.7"}`;
+  if (providerForTask(env, task) === "gateway") {
+    return `gateway:${env.AI_GATEWAY_PROVIDER ?? "custom-provider"}:${env.AI_GATEWAY_MODEL ?? env.MINIMAX_MODEL ?? "model"}`;
   }
   return env.AI_MODEL ?? "@cf/meta/llama-3.1-8b-instruct";
 }

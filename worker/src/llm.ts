@@ -21,7 +21,7 @@ type GenerateTextOptions = {
 
 type GenerateTextResult = {
   text: string;
-  provider: "workers_ai" | "minimax_gateway";
+  provider: "workers_ai" | "gateway";
   model: string;
 };
 
@@ -31,26 +31,26 @@ export async function generateAiText(
   options: GenerateTextOptions
 ): Promise<GenerateTextResult> {
   const provider = providerForTask(env, options.task);
-  if (provider === "minimax_gateway") {
-    const rateLimit = await minimaxRateLimitStatus(env, repo, options.task);
+  if (provider === "gateway") {
+    const rateLimit = await gatewayRateLimitStatus(env, repo, options.task);
     if (!rateLimit.allowed) {
       await repo.saveAiTokenUsage({
         task: options.task,
-        provider: "minimax_gateway",
-        model: env.MINIMAX_MODEL ?? "MiniMax-M2.7",
+        provider: "gateway",
+        model: gatewayModel(env),
         status: "rate_limited",
         error: rateLimit.reason
       });
       return await generateWorkersAiText(env, options);
     }
-    return await generateMiniMaxText(env, repo, options);
+    return await generateGatewayText(env, repo, options);
   }
   return await generateWorkersAiText(env, options);
 }
 
-export function providerForTask(env: Env, task: AiTextTask): "workers_ai" | "minimax_gateway" {
+export function providerForTask(env: Env, task: AiTextTask): "workers_ai" | "gateway" {
   const explicit = routeValue(env, task);
-  return explicit === "minimax_gateway" ? "minimax_gateway" : "workers_ai";
+  return explicit === "gateway" || explicit === "minimax_gateway" ? "gateway" : "workers_ai";
 }
 
 function routeValue(env: Env, task: AiTextTask): string {
@@ -64,35 +64,35 @@ function routeValue(env: Env, task: AiTextTask): string {
   return "workers_ai";
 }
 
-async function minimaxRateLimitStatus(
+async function gatewayRateLimitStatus(
   env: Env,
   repo: FinanceRepository,
   task: AiTextTask
 ): Promise<{ allowed: boolean; reason?: string }> {
   const since = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
-  const rows = await repo.aiTokenRequestCountsSince(since, "minimax_gateway");
+  const rows = await repo.aiTokenRequestCountsSince(since, "gateway");
   const totalUsed = rows.reduce((sum, row) => sum + Number(row.requests ?? 0), 0);
   const taskUsed = rows
     .filter((row) => row.task === task)
     .reduce((sum, row) => sum + Number(row.requests ?? 0), 0);
-  const totalCap = envNumber(env.MINIMAX_TOTAL_PER_5HOURS, 500);
-  const taskCap = minimaxTaskCap(env, task);
+  const totalCap = envNumber(env.GATEWAY_TOTAL_PER_5HOURS ?? env.MINIMAX_TOTAL_PER_5HOURS, 500);
+  const taskCap = gatewayTaskCap(env, task);
   if (totalUsed >= totalCap) {
-    return { allowed: false, reason: `minimax_total_per_5hours_exceeded:${totalUsed}/${totalCap}` };
+    return { allowed: false, reason: `gateway_total_per_5hours_exceeded:${totalUsed}/${totalCap}` };
   }
   if (taskUsed >= taskCap) {
-    return { allowed: false, reason: `minimax_task_per_5hours_exceeded:${task}:${taskUsed}/${taskCap}` };
+    return { allowed: false, reason: `gateway_task_per_5hours_exceeded:${task}:${taskUsed}/${taskCap}` };
   }
   return { allowed: true };
 }
 
-function minimaxTaskCap(env: Env, task: AiTextTask): number {
-  if (task === "generate_weekly_money_briefing") return envNumber(env.MINIMAX_LIMIT_GENERATE_WEEKLY_MONEY_BRIEFING, 20);
-  if (task === "find_unusual_transactions") return envNumber(env.MINIMAX_LIMIT_FIND_UNUSUAL_TRANSACTIONS, 100);
-  if (task === "query_finance") return envNumber(env.MINIMAX_LIMIT_QUERY_FINANCE, 200);
-  if (task === "recategorize_low_confidence") return envNumber(env.MINIMAX_LIMIT_RECATEGORIZE_LOW_CONFIDENCE, 50);
-  if (task === "generate_correction_rule_text") return envNumber(env.MINIMAX_LIMIT_GENERATE_CORRECTION_RULE_TEXT, 100);
-  if (task === "review_uncategorized_suggestions") return envNumber(env.MINIMAX_LIMIT_REVIEW_UNCATEGORIZED_SUGGESTIONS, 100);
+function gatewayTaskCap(env: Env, task: AiTextTask): number {
+  if (task === "generate_weekly_money_briefing") return envNumber(env.GATEWAY_LIMIT_GENERATE_WEEKLY_MONEY_BRIEFING ?? env.MINIMAX_LIMIT_GENERATE_WEEKLY_MONEY_BRIEFING, 20);
+  if (task === "find_unusual_transactions") return envNumber(env.GATEWAY_LIMIT_FIND_UNUSUAL_TRANSACTIONS ?? env.MINIMAX_LIMIT_FIND_UNUSUAL_TRANSACTIONS, 100);
+  if (task === "query_finance") return envNumber(env.GATEWAY_LIMIT_QUERY_FINANCE ?? env.MINIMAX_LIMIT_QUERY_FINANCE, 200);
+  if (task === "recategorize_low_confidence") return envNumber(env.GATEWAY_LIMIT_RECATEGORIZE_LOW_CONFIDENCE ?? env.MINIMAX_LIMIT_RECATEGORIZE_LOW_CONFIDENCE, 50);
+  if (task === "generate_correction_rule_text") return envNumber(env.GATEWAY_LIMIT_GENERATE_CORRECTION_RULE_TEXT ?? env.MINIMAX_LIMIT_GENERATE_CORRECTION_RULE_TEXT, 100);
+  if (task === "review_uncategorized_suggestions") return envNumber(env.GATEWAY_LIMIT_REVIEW_UNCATEGORIZED_SUGGESTIONS ?? env.MINIMAX_LIMIT_REVIEW_UNCATEGORIZED_SUGGESTIONS, 100);
   return 100;
 }
 
@@ -123,16 +123,16 @@ async function generateWorkersAiText(env: Env, options: GenerateTextOptions): Pr
   };
 }
 
-async function generateMiniMaxText(
+async function generateGatewayText(
   env: Env,
   repo: FinanceRepository,
   options: GenerateTextOptions
 ): Promise<GenerateTextResult> {
   const accountId = requiredEnv(env.AI_GATEWAY_ACCOUNT_ID, "AI_GATEWAY_ACCOUNT_ID");
   const gatewayId = env.AI_GATEWAY_ID ?? "default";
-  const provider = env.AI_GATEWAY_PROVIDER ?? "custom-minimax";
+  const provider = env.AI_GATEWAY_PROVIDER ?? "custom-provider";
   const token = requiredEnv(env.AI_GATEWAY_TOKEN, "AI_GATEWAY_TOKEN");
-  const model = env.MINIMAX_MODEL ?? "MiniMax-M2.7";
+  const model = gatewayModel(env);
   const url = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/${provider}/v1/chat/completions`;
 
   const response = await fetch(url, {
@@ -153,14 +153,14 @@ async function generateMiniMaxText(
   });
 
   const body = await response.json().catch(async () => ({ error: await response.text() })) as Record<string, unknown>;
-  const text = extractMiniMaxText(body);
+  const text = extractGatewayText(body);
   const usage = body.usage && typeof body.usage === "object" ? body.usage as Record<string, unknown> : {};
   const totalTokens = Number(usage.total_tokens ?? 0);
   const inputTokens = Number(usage.prompt_tokens ?? 0);
   const outputTokens = Number(usage.completion_tokens ?? 0);
   await repo.saveAiTokenUsage({
     task: options.task,
-    provider: "minimax_gateway",
+    provider: "gateway",
     model,
     inputTokens,
     outputTokens,
@@ -170,17 +170,17 @@ async function generateMiniMaxText(
   });
 
   if (!response.ok) {
-    throw new Error(`MiniMax AI Gateway request failed with ${response.status}: ${JSON.stringify(body).slice(0, 500)}`);
+    throw new Error(`AI Gateway request failed with ${response.status}: ${JSON.stringify(body).slice(0, 500)}`);
   }
 
   return {
     text,
-    provider: "minimax_gateway",
-    model: `minimax_gateway:${model}`
+    provider: "gateway",
+    model: `gateway:${provider}:${model}`
   };
 }
 
-function extractMiniMaxText(body: Record<string, unknown>): string {
+function extractGatewayText(body: Record<string, unknown>): string {
   const choices = body.choices;
   if (Array.isArray(choices)) {
     const first = choices[0];
@@ -211,6 +211,10 @@ function extractText(output: unknown): string {
 }
 
 function requiredEnv(value: string | undefined, name: string): string {
-  if (!value?.trim()) throw new Error(`${name} is required for MiniMax AI Gateway routing`);
+  if (!value?.trim()) throw new Error(`${name} is required for AI Gateway routing`);
   return value.trim();
+}
+
+function gatewayModel(env: Env): string {
+  return env.AI_GATEWAY_MODEL ?? env.MINIMAX_MODEL ?? "provider-model-name";
 }
