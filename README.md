@@ -10,9 +10,9 @@ A deploy-your-own remote MCP server for SimpleFIN finance data.
 Most personal finance MCPs either depend on Plaid-style paid aggregation or wrap
 heavier budgeting stacks such as Firefly III or Actual Budget. This starter is
 SimpleFIN-first: direct bank sync through SimpleFIN Bridge, Cloudflare-native
-storage and scheduling, agent-first response shapes, and honest AI health
-counters so callers know when categorization came from Workers AI versus a
-deterministic fallback.
+storage and scheduling, agent-first response shapes, hybrid AI routing, and
+honest AI health counters so callers know when categorization came from a model
+versus a deterministic fallback.
 
 This repository is a public starter. It contains no tokens, no financial data,
 no Cloudflare resource IDs, and no personal deployment history.
@@ -25,7 +25,8 @@ no Cloudflare resource IDs, and no personal deployment history.
 - Scheduled SimpleFIN sync with a 3-day incremental overlap
 - Automatic account-specific 90-day backfill for new/problem accounts
 - D1 cache with normalized accounts, transactions, sync runs, coverage, and audit events
-- Workers AI transaction categorization and weekly briefings
+- Workers AI transaction categorization with optional MiniMax reasoning routes
+  through Cloudflare AI Gateway
 - Honest AI health counters: real AI enrichments, deterministic fallbacks, parse failures, quota fallbacks, and low-confidence rows
 - Deterministic category guardrails for obvious payments, fees, subscriptions, dining, and one-off purchases
 - Canonical merchant keys for grouping/search, with processor-code cleanup and common synonym mapping
@@ -109,7 +110,8 @@ flowchart LR
   worker["Cloudflare Worker<br/>/mcp remote MCP server"]
   oauth["GitHub OAuth<br/>allowed login"]
   d1["D1<br/>finance cache + audit"]
-  ai["Workers AI<br/>categorization + briefings"]
+  ai["Workers AI<br/>hot-path categorization + embeddings"]
+  gateway["Cloudflare AI Gateway<br/>optional MiniMax reasoning"]
   vector["Vectorize<br/>semantic transaction search"]
   simplefin["SimpleFIN Bridge<br/>/accounts?version=2"]
   cron["Cloudflare Cron<br/>daily incremental sync"]
@@ -121,6 +123,7 @@ flowchart LR
   worker --> simplefin
   worker --> d1
   worker --> ai
+  worker --> gateway
   worker --> vector
 ```
 

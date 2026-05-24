@@ -1,5 +1,6 @@
 import type { Enrichment, Env, TransactionRow } from "./types.js";
 import { canonicalMerchantKey, FinanceRepository, transactionText } from "./repository.js";
+import { generateAiText, providerForTask } from "./llm.js";
 
 const DAILY_AI_ITEM_LIMIT = 500;
 const MAX_BRIEFING_ATTEMPTS = 2;
@@ -86,7 +87,7 @@ export async function generateBriefing(
   const cached = force ? null : await repo.latestBriefing(periodStart, periodEnd, "weekly");
   if (cached) return { cached: true, briefing: cached };
 
-  const model = env.AI_MODEL ?? "@cf/meta/llama-3.1-8b-instruct";
+  const model = modelForTask(env, "generate_weekly_money_briefing");
   const summary = await repo.summarizeCashflow({ startDate: periodStart, endDate: periodEnd });
   const periodDays = inclusiveDaySpan(periodStart, periodEnd);
   const priorEnd = daysBefore(periodStart, 1);
@@ -149,23 +150,15 @@ export async function generateBriefing(
 
   for (let attempt = 1; attempt <= MAX_BRIEFING_ATTEMPTS; attempt += 1) {
     try {
-      const output = await env.AI.run(model, {
-        messages: [
-          {
-            role: "system",
-            content: "You write concise personal finance briefings from structured data. Return one valid JSON object only. Do not invent facts."
-          },
-          {
-            role: "user",
-            content: buildBriefingPrompt(periodStart, periodEnd, briefingData, attempt)
-          }
-        ],
-        response_format: {
-          type: "json_schema",
-          json_schema: briefingSchema
-        }
-      } as AiTextGenerationInput);
-      const parsed = validateBriefing(parseJsonObject(extractText(output)));
+      const output = await generateAiText(env, repo, {
+        task: "generate_weekly_money_briefing",
+        workerModel: env.AI_MODEL ?? "@cf/meta/llama-3.1-8b-instruct",
+        maxTokens: 4000,
+        jsonSchema: briefingSchema,
+        system: "You write concise personal finance briefings from structured data. Return one valid JSON object only. Do not invent facts.",
+        prompt: buildBriefingPrompt(periodStart, periodEnd, briefingData, attempt)
+      });
+      const parsed = validateBriefing(parseJsonObject(output.text));
       parsed.comparison_window = comparisonWindow;
       parsed.summary_text = anchorSummaryText(String(parsed.summary_text), comparisonWindow);
       const briefing = await repo.saveBriefing({
@@ -174,9 +167,9 @@ export async function generateBriefing(
         kind: "weekly",
         summaryJson: parsed,
         summaryText: parsed.summary_text as string,
-        model
+        model: output.model
       });
-      await repo.saveAiUsage("generate_weekly_money_briefing", model, 1, "ok");
+      await repo.saveAiUsage("generate_weekly_money_briefing", output.model, 1, "ok");
       return { cached: false, attempts: attempt, briefing };
     } catch (error) {
       lastError = error;
@@ -202,7 +195,7 @@ export async function generateBriefing(
         fees: feeTransactions,
         largeTransactions
       },
-      summaryText: "Workers AI briefing generation failed; deterministic finance summary is available in summary_json.",
+      summaryText: "AI briefing generation failed; deterministic finance summary is available in summary_json.",
       model
     }),
     error: lastError instanceof Error ? lastError.message : String(lastError)
@@ -210,7 +203,7 @@ export async function generateBriefing(
 }
 
 export async function explainUnusualTransactions(env: Env, repo: FinanceRepository, limit = 10): Promise<Record<string, unknown>> {
-  const model = env.AI_MODEL ?? "@cf/meta/llama-3.1-8b-instruct";
+  const model = modelForTask(env, "find_unusual_transactions");
   const transactions = await repo.getTransactions({ limit: 1000 });
   const subscriptions = await repo.detectSubscriptions();
   const subscriptionKeys = new Set(
@@ -223,18 +216,19 @@ export async function explainUnusualTransactions(env: Env, repo: FinanceReposito
   if (unusual.length === 0) return { unusual_transactions: [] };
 
   try {
-    const output = await env.AI.run(model, {
-      messages: [
-        { role: "system", content: "Explain why transactions may be unusual using only the supplied data. Return strict JSON only." },
-        { role: "user", content: JSON.stringify({ transactions: unusual }) }
-      ],
-      response_format: {
-        type: "json_schema",
-        json_schema: unusualTransactionsSchema
-      }
-    } as AiTextGenerationInput);
-    await repo.saveAiUsage("find_unusual_transactions", model, unusual.length, "ok");
-    return { unusual_transactions: unusual, explanation: parseJsonObject(extractText(output)), explanation_status: "ai" };
+    const output = await generateAiText(env, repo, {
+      task: "find_unusual_transactions",
+      workerModel: env.AI_MODEL ?? "@cf/meta/llama-3.1-8b-instruct",
+      maxTokens: 3000,
+      jsonSchema: unusualTransactionsSchema,
+      system: "Explain why transactions may be unusual using only the supplied data. Return strict JSON only.",
+      prompt: JSON.stringify({
+        required_shape: unusualTransactionsSchema,
+        transactions: unusual
+      })
+    });
+    await repo.saveAiUsage("find_unusual_transactions", output.model, unusual.length, "ok");
+    return { unusual_transactions: unusual, explanation: parseJsonObject(output.text), explanation_status: output.provider };
   } catch (error) {
     await repo.saveAiUsage("find_unusual_transactions", model, unusual.length, "error", error);
     return {
@@ -256,6 +250,13 @@ export function extractText(output: unknown): string {
     if (typeof record.text === "string") return record.text;
   }
   return JSON.stringify(output);
+}
+
+function modelForTask(env: Env, task: "generate_weekly_money_briefing" | "find_unusual_transactions"): string {
+  if (providerForTask(env, task) === "minimax_gateway") {
+    return `minimax_gateway:${env.MINIMAX_MODEL ?? "MiniMax-M2.7"}`;
+  }
+  return env.AI_MODEL ?? "@cf/meta/llama-3.1-8b-instruct";
 }
 
 const categorizationSchema = {
@@ -332,10 +333,10 @@ ${JSON.stringify(data)}`;
 
 function validateBriefing(value: Record<string, unknown>): Record<string, unknown> {
   if (typeof value.summary_text !== "string") {
-    throw new Error("Workers AI briefing response missing summary_text");
+    throw new Error("AI briefing response missing summary_text");
   }
   if (!Array.isArray(value.insights) || value.insights.some((item) => !isInsight(item))) {
-    throw new Error("Workers AI briefing response missing insights");
+    throw new Error("AI briefing response missing insights");
   }
   value.insights = value.insights.slice(0, 3);
   return value;
@@ -577,7 +578,8 @@ function normalizeTransactionMerchant(transaction: TransactionRow, fallback: str
 }
 
 function parseJsonObject(text: string): Record<string, unknown> {
-  const candidates = jsonCandidates(text);
+  const cleaned = stripReasoningBlocks(text);
+  const candidates = jsonCandidates(cleaned);
   let lastError: unknown;
   for (const candidate of candidates) {
     try {
@@ -592,7 +594,7 @@ function parseJsonObject(text: string): Record<string, unknown> {
     }
   }
   const detail = lastError instanceof Error ? lastError.message : "unknown parse error";
-  throw new Error(`Workers AI did not return parseable JSON: ${detail}; raw_preview=${text.slice(0, 600)}`);
+  throw new Error(`AI provider did not return parseable JSON: ${detail}; raw_preview=${cleaned.slice(0, 600)}`);
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -606,7 +608,49 @@ function jsonCandidates(text: string): string[] {
   const objectStart = stripped.indexOf("{");
   const objectEnd = stripped.lastIndexOf("}");
   if (objectStart >= 0 && objectEnd > objectStart) candidates.push(stripped.slice(objectStart, objectEnd + 1));
+  candidates.push(...balancedJsonObjects(stripped));
   return [...new Set(candidates)];
+}
+
+function stripReasoningBlocks(text: string): string {
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/```(?:json)?/gi, "")
+    .replace(/```/g, "")
+    .trim();
+}
+
+function balancedJsonObjects(text: string): string[] {
+  const objects: string[] = [];
+  for (let start = 0; start < text.length; start += 1) {
+    if (text[start] !== "{") continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === "\"") {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (char === "{") depth += 1;
+      if (char === "}") depth -= 1;
+      if (depth === 0) {
+        objects.push(text.slice(start, index + 1));
+        break;
+      }
+    }
+  }
+  return objects.sort((left, right) => right.length - left.length);
 }
 
 function repairJson(text: string): string {

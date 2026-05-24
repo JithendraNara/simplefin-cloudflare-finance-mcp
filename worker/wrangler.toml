@@ -18,6 +18,16 @@ INCREMENTAL_OVERLAP_DAYS = "3"
 DATA_MAX_STALENESS_HOURS = "36"
 AI_MODEL = "@cf/meta/llama-3.1-8b-instruct"
 EMBEDDING_MODEL = "@cf/baai/bge-m3"
+AI_TEXT_PROVIDER = "workers_ai"
+AI_ROUTE_CATEGORIZE_TRANSACTIONS = "workers_ai"
+AI_ROUTE_FIND_UNUSUAL_TRANSACTIONS = "minimax_gateway"
+AI_ROUTE_GENERATE_WEEKLY_MONEY_BRIEFING = "minimax_gateway"
+AI_ROUTE_QUERY_FINANCE = "minimax_gateway"
+AI_ROUTE_REVIEW_UNCATEGORIZED_SUGGESTIONS = "minimax_gateway"
+AI_GATEWAY_ACCOUNT_ID = "00000000000000000000000000000000"
+AI_GATEWAY_ID = "default"
+AI_GATEWAY_PROVIDER = "custom-minimax"
+MINIMAX_MODEL = "MiniMax-M2.7"
 GITHUB_ALLOWED_LOGIN = "your-github-login"
 PUBLIC_ORIGIN = "https://finance.example.com"
 PUBLIC_MCP_URL = "https://finance.example.com/mcp"
@@ -53,3 +63,4 @@ enabled = false
 #   npx wrangler secret put GITHUB_CLIENT_ID --config worker/wrangler.toml
 #   npx wrangler secret put GITHUB_CLIENT_SECRET --config worker/wrangler.toml
 #   npx wrangler secret put COOKIE_ENCRYPTION_KEY --config worker/wrangler.toml
+#   npx wrangler secret put AI_GATEWAY_TOKEN --config worker/wrangler.toml

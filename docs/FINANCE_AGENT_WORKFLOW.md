@@ -82,8 +82,17 @@ Avoid loading raw transaction history unless the user asks a narrow question. If
 
 ## AI And Insight Provenance
 
-Workers AI is an enrichment layer. SQL totals, account coverage, sync status,
-and raw SimpleFIN diagnostics remain deterministic.
+Workers AI is the default enrichment layer for hot-path categorization and
+embeddings. SQL totals, account coverage, sync status, and raw SimpleFIN
+diagnostics remain deterministic.
+
+The Worker also supports optional per-task routing through Cloudflare AI
+Gateway. A larger model such as MiniMax M2.7 is best used for
+latency-tolerant reasoning tasks such as weekly briefings, unusual-transaction
+explanations, future natural-language finance queries, and future review
+suggestions for hard uncategorized rows. Keep the main categorizer on Workers
+AI plus deterministic rules/corrections unless your own eval proves the
+alternate provider preserves merchant normalization and parse reliability.
 
 Categorization uses structured JSON output, JSON repair/validation, and
 deterministic guardrails. Guardrails correct obvious card payments, fees,
@@ -92,8 +101,8 @@ review-needed irregular merchants. The `ai_reason` field should explain whether
 the final category came directly from AI or from a guardrail repair.
 
 `find_unusual_transactions` returns `explanation_status` so agents know whether
-the explanation came from AI or deterministic fallback. It should exclude
-routine transfers and known recurring subscriptions.
+the explanation came from the configured AI reasoning provider or deterministic
+fallback. It should exclude routine transfers and known recurring subscriptions.
 
 `generate_weekly_money_briefing` is expected to use current-period totals,
 prior-period totals, an explicit `comparison_window`, trailing-30-day fee

@@ -146,6 +146,7 @@ export class FinanceRepository {
     )
       .bind(aiSince.toISOString())
       .all();
+    const aiTokenUsageToday = await this.aiTokenUsageSince(aiSince.toISOString());
 
     const transactions = Number(coverage?.transactions ?? 0);
     const enriched = Number(coverage?.enriched_transactions ?? 0);
@@ -178,6 +179,10 @@ export class FinanceRepository {
 	      coverage,
       recent_syncs: recentSyncs,
       ai_usage_today: aiUsageToday,
+      ai_token_usage_today: aiTokenUsageToday,
+      minimax_tokens_today: aiTokenUsageToday
+        .filter((row) => row.provider === "minimax_gateway")
+        .reduce((sum, row) => sum + Number(row.total_tokens ?? 0), 0),
       limits: {
         simplefin_sync_window_days_max: 90,
         manual_syncs_per_hour_without_force: 3,
@@ -1550,6 +1555,57 @@ export class FinanceRepository {
         error instanceof Error ? error.message : error ? String(error) : null
       )
       .run();
+  }
+
+  async saveAiTokenUsage(data: {
+    task: string;
+    provider: string;
+    model: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    status: "ok" | "error";
+    error?: unknown;
+  }): Promise<void> {
+    await this.env.DB.prepare(
+      `INSERT INTO ai_token_usage
+       (id, created_at, provider, model, task, input_tokens, output_tokens, total_tokens, status, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        crypto.randomUUID(),
+        new Date().toISOString(),
+        data.provider,
+        data.model,
+        data.task,
+        Math.max(0, Math.round(Number(data.inputTokens ?? 0))),
+        Math.max(0, Math.round(Number(data.outputTokens ?? 0))),
+        Math.max(0, Math.round(Number(data.totalTokens ?? 0))),
+        data.status,
+        data.error instanceof Error ? data.error.message : data.error ? String(data.error).slice(0, 500) : null
+      )
+      .run();
+  }
+
+  async aiTokenUsageSince(sinceIso: string): Promise<Array<Record<string, unknown>>> {
+    const { results } = await this.env.DB.prepare(
+      `SELECT
+        provider,
+        model,
+        task,
+        status,
+        COUNT(*) AS runs,
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(total_tokens), 0) AS total_tokens
+       FROM ai_token_usage
+       WHERE created_at >= ?
+       GROUP BY provider, model, task, status
+       ORDER BY total_tokens DESC, runs DESC`
+    )
+      .bind(sinceIso)
+      .all<Record<string, unknown>>();
+    return results;
   }
 
   async dailyAiUsageCount(): Promise<number> {

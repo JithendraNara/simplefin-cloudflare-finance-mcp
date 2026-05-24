@@ -17,6 +17,17 @@ export interface Env {
   DATA_MAX_STALENESS_HOURS?: string;
   AI_MODEL?: string;
   EMBEDDING_MODEL?: string;
+  AI_TEXT_PROVIDER?: string;
+  AI_ROUTE_CATEGORIZE_TRANSACTIONS?: string;
+  AI_ROUTE_FIND_UNUSUAL_TRANSACTIONS?: string;
+  AI_ROUTE_GENERATE_WEEKLY_MONEY_BRIEFING?: string;
+  AI_ROUTE_QUERY_FINANCE?: string;
+  AI_ROUTE_REVIEW_UNCATEGORIZED_SUGGESTIONS?: string;
+  AI_GATEWAY_ACCOUNT_ID?: string;
+  AI_GATEWAY_ID?: string;
+  AI_GATEWAY_PROVIDER?: string;
+  AI_GATEWAY_TOKEN?: string;
+  MINIMAX_MODEL?: string;
 }
 
 export type ToolAuth = {

@@ -407,7 +407,7 @@ export function createFinanceMcpServer(env: Env, auth: ToolAuth): McpServer {
     "find_unusual_transactions",
     {
       title: "Find Unusual Transactions",
-      description: "Find and explain unusual transactions using deterministic baselines plus Workers AI.",
+      description: "Find and explain unusual transactions using deterministic baselines plus the configured AI reasoning provider.",
       inputSchema: {
         limit: z.number().int().min(1).max(50).default(10)
       }
@@ -419,7 +419,7 @@ export function createFinanceMcpServer(env: Env, auth: ToolAuth): McpServer {
     "generate_weekly_money_briefing",
     {
       title: "Generate Weekly Money Briefing",
-      description: "Generate or return a cached Workers AI weekly finance briefing.",
+      description: "Generate or return a cached weekly finance briefing using the configured AI reasoning provider.",
       inputSchema: {
         endDate: dateSchema,
         force: z.boolean().optional()

@@ -1,6 +1,8 @@
 # SimpleFIN Finance MCP Worker
 
-Cloudflare Worker that syncs SimpleFIN on a schedule into D1, enriches finance data with Workers AI, indexes transactions in Vectorize, and exposes a remote MCP server at `/mcp`.
+Cloudflare Worker that syncs SimpleFIN on a schedule into D1, enriches finance
+data with Workers AI plus optional Cloudflare AI Gateway routing, indexes
+transactions in Vectorize, and exposes a remote MCP server at `/mcp`.
 
 This is the hosted agent layer. It does not need Docker.
 
@@ -11,7 +13,8 @@ MCP-capable agent
   -> /mcp
     -> Cloudflare Worker
       -> D1 finance cache
-      -> Workers AI enrichment
+      -> Workers AI hot-path enrichment
+      -> optional AI Gateway reasoning provider
       -> Vectorize semantic search
       -> scheduled SimpleFIN sync
 ```
@@ -53,6 +56,7 @@ npx wrangler secret put ADMIN_TOKEN --config worker/wrangler.toml
 npx wrangler secret put GITHUB_CLIENT_ID --config worker/wrangler.toml
 npx wrangler secret put GITHUB_CLIENT_SECRET --config worker/wrangler.toml
 openssl rand -base64 32 | npx wrangler secret put COOKIE_ENCRYPTION_KEY --config worker/wrangler.toml
+npx wrangler secret put AI_GATEWAY_TOKEN --config worker/wrangler.toml
 ```
 
 Deploy:
@@ -214,8 +218,9 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 - `refresh_insights`
 - `worker_audit_events` (admin only)
 
-Weekly briefing generation requests structured JSON from Workers AI and retries
-once when the model returns invalid JSON. If both attempts fail, the Worker
+Weekly briefing generation requests structured JSON from the configured AI
+reasoning provider and retries once when the model returns invalid JSON. If
+both attempts fail, the Worker
 saves and returns a deterministic aggregate fallback instead of failing sync.
 Briefings receive current-period totals, prior-period totals, an explicit
 comparison window, trailing-30-day fee totals, top subscriptions, unusual
@@ -255,6 +260,43 @@ embedding, and feeds recent corrections into future categorization prompts.
 `label_eval_transaction` and `run_eval` create calibration history in
 `eval_labels` and `eval_runs`, so confidence values can be measured instead of
 treated as decorative model output.
+
+## AI Routing
+
+Per-task routing lets you use a fast, reliable model for classification and a
+larger reasoning model only where it pays off:
+
+- `categorize_transactions`: Workers AI plus deterministic guardrails,
+  corrections, and merchant canonicalization.
+- `semantic_index_transaction` / `semantic_reindex_transaction`: Workers AI
+  embeddings through `EMBEDDING_MODEL`.
+- `generate_weekly_money_briefing`: optional MiniMax or another Gateway-backed
+  model.
+- `find_unusual_transactions`: deterministic anomaly selection plus optional
+  Gateway-backed explanation generation.
+- `query_finance` and `review_uncategorized_suggestions`: reserved
+  latency-tolerant reasoning routes.
+
+Set route vars in `worker/wrangler.toml` and keep real Gateway credentials in
+the `AI_GATEWAY_TOKEN` secret:
+
+```toml
+AI_TEXT_PROVIDER = "workers_ai"
+AI_ROUTE_CATEGORIZE_TRANSACTIONS = "workers_ai"
+AI_ROUTE_FIND_UNUSUAL_TRANSACTIONS = "minimax_gateway"
+AI_ROUTE_GENERATE_WEEKLY_MONEY_BRIEFING = "minimax_gateway"
+AI_GATEWAY_ACCOUNT_ID = "00000000000000000000000000000000"
+AI_GATEWAY_ID = "default"
+AI_GATEWAY_PROVIDER = "custom-minimax"
+MINIMAX_MODEL = "MiniMax-M2.7"
+```
+
+Gateway-backed reasoning models may emit reasoning blocks before final JSON.
+The Worker strips `<think>...</think>`, extracts balanced JSON candidates, and
+applies JSON repair before falling back.
+
+`worker_operational_status` exposes `ai_token_usage_today` and
+provider-specific token counters such as `minimax_tokens_today`.
 
 ## Secure Operational Audit
 

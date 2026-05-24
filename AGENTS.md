@@ -36,6 +36,15 @@ Agent usage rules:
 - Check `ai_enrichment.ai_enriched`, `fallback_enriched`, `parse_fallback`,
   and `quota_fallback` before trusting AI-derived categories, subscriptions,
   anomaly explanations, or briefings.
+- Keep categorization on Workers AI plus deterministic rules/corrections unless
+  your own eval proves another provider preserves merchant normalization,
+  latency, and parse reliability. Use Gateway-backed models such as MiniMax for
+  slower reasoning tasks like weekly briefings, anomaly explanations, future
+  natural-language finance queries, and review suggestions.
+- Gateway-backed reasoning models may emit `<think>...</think>` before JSON.
+  Preserve the shared parser cleanup path and check
+  `worker_operational_status.ai_token_usage_today` plus provider token counters
+  when validating routing and budget.
 - Status tools may include agent-only `actionable_hint` values. Briefing prompts
   should use human-safe issue messages so final prose does not repeat tool
   instructions.
